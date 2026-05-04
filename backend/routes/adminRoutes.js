@@ -4,7 +4,8 @@ import {
   getLogs, getStats, getAllAttendance, getWeeklyAttendance, getLeaves, updateLeaveStatus, 
   createNotification, updateSettings, getEmployeeDocuments, uploadDocument, deleteDocument,
   getEmployeeActivityLogs, getAdmins, createAdmin, deleteAdmin, getHourlyReports,
-  getEmployeeHourlyReports
+  getEmployeeHourlyReports, getPresentEmployees, getHalfDayEmployees, getLateEmployees,
+  getAbsentEmployees, getActiveLeaveEmployees
 } from '../controllers/adminController.js';
 import { upload } from '../cloudinary.js';
 
@@ -19,6 +20,11 @@ router.get('/logs', getLogs);
 router.get('/stats', getStats);
 router.get('/attendance/all', getAllAttendance);
 router.get('/attendance/weekly', getWeeklyAttendance);
+router.get('/attendance/present', getPresentEmployees);
+router.get('/attendance/halfday', getHalfDayEmployees);
+router.get('/attendance/late', getLateEmployees);
+router.get('/attendance/absent', getAbsentEmployees);
+router.get('/leaves/active', getActiveLeaveEmployees);
 router.get('/leaves', getLeaves);
 router.patch('/leaves/:id', updateLeaveStatus);
 router.post('/notifications', createNotification);

@@ -460,3 +460,92 @@ export const getWeeklyAttendance = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+export const getPresentEmployees = async (req, res) => {
+  try {
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const date = req.query.date || today;
+
+    const attendances = await Attendance.find({ date, status: 'Present' }).populate('employeeId');
+    const employees = attendances.map(a => a.employeeId).filter(e => e && e.status === 'Active');
+    res.json({ success: true, employees });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getHalfDayEmployees = async (req, res) => {
+  try {
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const date = req.query.date || today;
+
+    const attendances = await Attendance.find({ date, status: 'Half Day' }).populate('employeeId');
+    const employees = attendances.map(a => a.employeeId).filter(e => e && e.status === 'Active');
+    res.json({ success: true, employees });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getLateEmployees = async (req, res) => {
+  try {
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const date = req.query.date || today;
+
+    const attendances = await Attendance.find({ date, status: 'Late' }).populate('employeeId');
+    const employees = attendances.map(a => a.employeeId).filter(e => e && e.status === 'Active');
+    res.json({ success: true, employees });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getAbsentEmployees = async (req, res) => {
+  try {
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const date = req.query.date || today;
+
+    const allActiveEmployees = await Employee.find({ status: 'Active' });
+    const attendances = await Attendance.find({ date });
+    const leaves = await LeaveRequest.find({ 
+      status: 'APPROVED', 
+      fromDate: { $lte: date }, 
+      toDate: { $gte: date } 
+    });
+
+    const attendedIds = attendances.map(a => a.employeeId.toString());
+    const leaveIds = leaves.map(l => l.employeeId.toString());
+
+    const absentEmployees = allActiveEmployees.filter(emp => 
+      !attendedIds.includes(emp._id.toString()) && !leaveIds.includes(emp._id.toString())
+    );
+
+    res.json({ success: true, employees: absentEmployees });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getActiveLeaveEmployees = async (req, res) => {
+  try {
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const date = req.query.date || today;
+
+    const leaves = await LeaveRequest.find({ 
+      status: 'APPROVED', 
+      fromDate: { $lte: date }, 
+      toDate: { $gte: date } 
+    }).populate('employeeId');
+
+    const employees = leaves.map(l => l.employeeId).filter(e => e && e.status === 'Active');
+    res.json({ success: true, employees });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
