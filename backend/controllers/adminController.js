@@ -6,7 +6,11 @@ import SystemSetting from '../models/SystemSetting.js';
 import Notification from '../models/Notification.js';
 import Document from '../models/Document.js';
 import Admin from '../models/Admin.js';
+import Note from '../models/Note.js';
+import Resignation from '../models/Resignation.js';
 import bcrypt from 'bcrypt';
+import exceljs from 'exceljs';
+import PDFDocument from 'pdfkit';
 
 export const getEmployees = async (req, res) => {
   try {
@@ -31,6 +35,17 @@ export const createEmployee = async (req, res) => {
     const employee = await Employee.create(req.body);
     res.json({ success: true, employee });
   } catch (error) {
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyValue)[0];
+      const value = error.keyValue[field];
+      let message = `Duplicate value error.`;
+      if (field === 'empCode') {
+        message = `Employee Code "${value}" already exists. Please use a unique Employee Code.`;
+      } else if (field === 'email') {
+        message = `Email address "${value}" is already in use. Please use a different email.`;
+      }
+      return res.status(400).json({ success: false, message });
+    }
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -41,6 +56,17 @@ export const updateEmployee = async (req, res) => {
     if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
     res.json({ success: true, employee });
   } catch (error) {
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyValue)[0];
+      const value = error.keyValue[field];
+      let message = `Duplicate value error.`;
+      if (field === 'empCode') {
+        message = `Employee Code "${value}" already exists. Please use a unique Employee Code.`;
+      } else if (field === 'email') {
+        message = `Email address "${value}" is already in use. Please use a different email.`;
+      }
+      return res.status(400).json({ success: false, message });
+    }
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -81,7 +107,7 @@ export const getStats = async (req, res) => {
     const targetDate = req.query.date || today;
     
     const totalEmployees = await Employee.countDocuments({ status: 'Active' });
-    const presentToday = await Attendance.countDocuments({ date: targetDate, status: 'Present' });
+    const presentToday = await Attendance.countDocuments({ date: targetDate, status: { $in: ['Present', 'Late'] } });
     const halfDayToday = await Attendance.countDocuments({ date: targetDate, status: 'Half Day' });
     const lateToday = await Attendance.countDocuments({ date: targetDate, status: 'Late' });
     const leavesToday = await LeaveRequest.countDocuments({ 
@@ -89,7 +115,7 @@ export const getStats = async (req, res) => {
       fromDate: { $lte: targetDate }, 
       toDate: { $gte: targetDate } 
     });
-    const totalPresent = presentToday + halfDayToday + lateToday;
+    const totalPresent = presentToday + halfDayToday;
     const absentToday = Math.max(0, totalEmployees - totalPresent - leavesToday);
     
     res.json({
@@ -172,7 +198,7 @@ export const updateLeaveStatus = async (req, res) => {
     const leave = await LeaveRequest.findByIdAndUpdate(
       req.params.id, 
       { status, approvedBy, approvedOn: new Date() },
-      { returnDocument: 'after' }
+      { new: true }
     );
 
     if (!leave) {
@@ -198,10 +224,35 @@ export const updateSettings = async (req, res) => {
   try {
     const { key, value, settings } = req.body;
     if (settings && Array.isArray(settings)) {
+      // Check if maintenance_mode is set to true/enabled in settings array
+      const maintItem = settings.find(s => s.key === 'maintenance_mode');
+      if (maintItem && (maintItem.value === 'true' || maintItem.value === true)) {
+        // Only set maintenance_start_time if maintenance mode was not already enabled
+        const existing = await SystemSetting.findOne({ key: 'maintenance_mode' });
+        const alreadyEnabled = existing && (existing.value === 'true' || existing.value === true);
+        if (!alreadyEnabled) {
+          await SystemSetting.findOneAndUpdate(
+            { key: 'maintenance_start_time' },
+            { value: new Date().toISOString() },
+            { upsert: true }
+          );
+        }
+      }
       for (const item of settings) {
         await SystemSetting.findOneAndUpdate({ key: item.key }, { value: item.value }, { upsert: true });
       }
     } else {
+      if (key === 'maintenance_mode' && (value === 'true' || value === true)) {
+        const existing = await SystemSetting.findOne({ key: 'maintenance_mode' });
+        const alreadyEnabled = existing && (existing.value === 'true' || existing.value === true);
+        if (!alreadyEnabled) {
+          await SystemSetting.findOneAndUpdate(
+            { key: 'maintenance_start_time' },
+            { value: new Date().toISOString() },
+            { upsert: true }
+          );
+        }
+      }
       await SystemSetting.findOneAndUpdate({ key }, { value }, { upsert: true });
     }
     res.json({ success: true });
@@ -448,7 +499,7 @@ export const getWeeklyAttendance = async (req, res) => {
       const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
 
-      const present = await Attendance.countDocuments({ date: dateStr, status: 'Present' });
+      const present = await Attendance.countDocuments({ date: dateStr, status: { $in: ['Present', 'Late'] } });
       const late = await Attendance.countDocuments({ date: dateStr, status: 'Late' });
       const half = await Attendance.countDocuments({ date: dateStr, status: 'Half Day' });
 
@@ -467,7 +518,7 @@ export const getPresentEmployees = async (req, res) => {
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     const date = req.query.date || today;
 
-    const attendances = await Attendance.find({ date, status: 'Present' }).populate('employeeId');
+    const attendances = await Attendance.find({ date, status: { $in: ['Present', 'Late'] } }).populate('employeeId');
     const employees = attendances.map(a => a.employeeId).filter(e => e && e.status === 'Active');
     res.json({ success: true, employees });
   } catch (error) {
@@ -549,3 +600,192 @@ export const getActiveLeaveEmployees = async (req, res) => {
   }
 };
 
+export const getEmployeeNotes = async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const notes = await Note.find({ employeeId }).sort({ createdAt: -1 }).limit(100);
+    // Mark all as read
+    await Note.updateMany({ employeeId, isRead: false }, { isRead: true });
+    res.json({ success: true, notes });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const exportAttendanceExcel = async (req, res) => {
+  try {
+    const { date } = req.query;
+    const now = new Date();
+    const targetDate = date || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+    const attendances = await Attendance.find({ date: targetDate }).populate('employeeId', 'fullName empCode department');
+
+    const workbook = new exceljs.Workbook();
+    const worksheet = workbook.addWorksheet('Attendance Report');
+
+    worksheet.columns = [
+      { header: 'Emp Code', key: 'empCode', width: 15 },
+      { header: 'Name', key: 'name', width: 25 },
+      { header: 'Department', key: 'department', width: 20 },
+      { header: 'Status', key: 'status', width: 15 },
+      { header: 'Check In', key: 'checkIn', width: 20 },
+      { header: 'Check Out', key: 'checkOut', width: 20 },
+      { header: 'Work Hours', key: 'workHours', width: 15 }
+    ];
+
+    attendances.forEach(att => {
+      worksheet.addRow({
+        empCode: att.employeeId?.empCode || 'N/A',
+        name: att.employeeId?.fullName || 'N/A',
+        department: att.employeeId?.department || 'N/A',
+        status: att.status,
+        checkIn: att.checkIn ? new Date(att.checkIn).toLocaleTimeString() : 'N/A',
+        checkOut: att.checkOut ? new Date(att.checkOut).toLocaleTimeString() : 'N/A',
+        workHours: att.workHours || '0h 0m'
+      });
+    });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="Attendance_${targetDate}.xlsx"`);
+    
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const exportAttendancePdf = async (req, res) => {
+  try {
+    const { date } = req.query;
+    const now = new Date();
+    const targetDate = date || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+    const attendances = await Attendance.find({ date: targetDate }).populate('employeeId', 'fullName empCode');
+
+    const doc = new PDFDocument();
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Attendance_${targetDate}.pdf"`);
+    
+    doc.pipe(res);
+    
+    doc.fontSize(20).text(`Attendance Report - ${targetDate}`, { align: 'center' });
+    doc.moveDown();
+
+    attendances.forEach(att => {
+      doc.fontSize(12).text(`Emp Code: ${att.employeeId?.empCode || 'N/A'}`);
+      doc.text(`Name: ${att.employeeId?.fullName || 'N/A'}`);
+      doc.text(`Status: ${att.status}`);
+      doc.text(`Check In: ${att.checkIn ? new Date(att.checkIn).toLocaleTimeString() : 'N/A'}`);
+      doc.text(`Check Out: ${att.checkOut ? new Date(att.checkOut).toLocaleTimeString() : 'N/A'}`);
+      doc.text(`Work Hours: ${att.workHours || '0h 0m'}`);
+      doc.moveDown();
+    });
+
+    doc.end();
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateEmployeeCheckIn = async (req, res) => {
+  try {
+    const { employeeId, date, checkInTime } = req.body;
+    
+    if (!employeeId || !date || !checkInTime) {
+      return res.status(400).json({ success: false, message: 'Missing required fields' });
+    }
+
+    // checkInTime is "HH:mm"
+    const checkInDate = new Date(`${date}T${checkInTime}:00`);
+    
+    // Late threshold: 10:00 AM
+    const lateThreshold = new Date(`${date}T10:00:00`);
+    const status = checkInDate > lateThreshold ? 'Late' : 'Present';
+
+    let record = await Attendance.findOne({ employeeId, date });
+
+    if (record) {
+      record.checkIn = checkInDate;
+      record.status = status;
+
+      if (record.checkOut) {
+        const mins = Math.floor((new Date(record.checkOut) - checkInDate) / (1000 * 60));
+        record.workHours = `${Math.floor(mins / 60)}h ${mins % 60}m`;
+      }
+      await record.save();
+    } else {
+      record = await Attendance.create({
+        employeeId,
+        date,
+        checkIn: checkInDate,
+        status,
+        workStatus: 'Pending'
+      });
+    }
+
+    res.json({ success: true, record });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getAllResignations = async (req, res) => {
+  try {
+    const { status, search } = req.query;
+
+    let query = {};
+    if (status && status !== 'All Status') {
+      query.status = status.toUpperCase();
+    }
+
+    let resignations = await Resignation.find(query)
+      .populate('employeeId', 'fullName empCode department profileImage designation')
+      .sort({ submittedOn: -1 });
+
+    // Search filter by employee name
+    if (search) {
+      const lower = search.toLowerCase();
+      resignations = resignations.filter(r =>
+        r.employeeId?.fullName?.toLowerCase().includes(lower) ||
+        r.employeeId?.empCode?.toLowerCase().includes(lower)
+      );
+    }
+
+    const total = resignations.length;
+    const pending = resignations.filter(r => r.status === 'PENDING').length;
+    const approved = resignations.filter(r => r.status === 'APPROVED').length;
+    const rejected = resignations.filter(r => r.status === 'REJECTED').length;
+
+    res.json({
+      success: true,
+      resignations,
+      stats: { total, pending, approved, rejected }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateResignationStatus = async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (!status) {
+      return res.status(400).json({ success: false, message: 'Status is required' });
+    }
+
+    const resignation = await Resignation.findByIdAndUpdate(
+      req.params.id,
+      { status, reviewedOn: new Date() },
+      { new: true }
+    ).populate('employeeId', 'fullName empCode department profileImage designation');
+
+    if (!resignation) {
+      return res.status(404).json({ success: false, message: 'Resignation not found' });
+    }
+
+    res.json({ success: true, resignation });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
