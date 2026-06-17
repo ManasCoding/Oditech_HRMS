@@ -140,7 +140,7 @@ export const getAllAttendance = async (req, res) => {
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     const targetDate = req.query.date || today;
     
-    const employees = await Employee.find({ status: 'Active' }).select('fullName empCode profileImage');
+    const employees = await Employee.find({ status: 'Active' }).select('fullName empCode profileImage department role designation');
     const attendances = await Attendance.find({ date: targetDate });
     const leaves = await LeaveRequest.find({ 
       status: 'APPROVED', 
@@ -154,21 +154,31 @@ export const getAllAttendance = async (req, res) => {
       
       let status = 'Absent';
       let checkIn = null;
+      let checkOut = null;
       let workHours = null;
+      let overtime = null;
+      let _id = emp._id.toString();
 
       if (att) {
         status = att.status;
         checkIn = att.checkIn;
+        checkOut = att.checkOut;
         workHours = att.workHours;
+        overtime = att.overtime;
+        _id = att._id;
       } else if (leave) {
         status = 'On Leave';
       }
 
       return {
+        _id,
         employeeId: emp,
         status,
         checkIn,
-        workHours
+        checkOut,
+        workHours,
+        overtime,
+        date: targetDate
       };
     });
 
@@ -720,6 +730,42 @@ export const updateEmployeeCheckIn = async (req, res) => {
         date,
         checkIn: checkInDate,
         status,
+        workStatus: 'Pending'
+      });
+    }
+
+    res.json({ success: true, record });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateEmployeeCheckOut = async (req, res) => {
+  try {
+    const { employeeId, date, checkOutTime } = req.body;
+    
+    if (!employeeId || !date || !checkOutTime) {
+      return res.status(400).json({ success: false, message: 'Missing required fields' });
+    }
+
+    const checkOutDate = new Date(`${date}T${checkOutTime}:00`);
+
+    let record = await Attendance.findOne({ employeeId, date });
+
+    if (record) {
+      record.checkOut = checkOutDate;
+
+      if (record.checkIn) {
+        const mins = Math.floor((checkOutDate - new Date(record.checkIn)) / (1000 * 60));
+        record.workHours = `${Math.floor(mins / 60)}h ${mins % 60}m`;
+      }
+      await record.save();
+    } else {
+      record = await Attendance.create({
+        employeeId,
+        date,
+        checkOut: checkOutDate,
+        status: 'Absent',
         workStatus: 'Pending'
       });
     }

@@ -4,6 +4,23 @@ import Attendance from '../models/Attendance.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import Task from '../models/Task.js';
 import SystemSetting from '../models/SystemSetting.js';
+import Note from '../models/Note.js';
+import Resignation from '../models/Resignation.js';
+
+// Helper for distance calculation
+const getDistance = (lat1, lon1, lat2, lon2) => {
+  const R = 6371e3; // metres
+  const φ1 = lat1 * Math.PI / 180; // φ, λ in radians
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+  const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+            Math.cos(φ1) * Math.cos(φ2) *
+            Math.sin(Δλ/2) * Math.sin(Δλ/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c; // in metres
+};
 
 export const getProfile = async (req, res) => {
   try {
@@ -79,24 +96,41 @@ export const checkIn = async (req, res) => {
   const { employeeId, lat, lng } = req.body;
   const now = new Date();
   
-  // Get local date in YYYY-MM-DD format
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
+  // Get local date in YYYY-MM-DD format (Asia/Kolkata)
+  const tzStr = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+  const localDate = new Date(tzStr);
+  
+  const year = localDate.getFullYear();
+  const month = String(localDate.getMonth() + 1).padStart(2, '0');
+  const day = String(localDate.getDate()).padStart(2, '0');
   const today = `${year}-${month}-${day}`;
   
   try {
     let attendance = await Attendance.findOne({ employeeId, date: today });
     if (!attendance) {
-      // Get settings for late threshold
-      const lateSetting = await SystemSetting.findOne({ key: 'late_threshold' });
-      const lateThreshold = lateSetting ? lateSetting.value : '09:40';
+      // Validate GPS Geofence
+      if (lat && lng) {
+        const settings = await SystemSetting.find({ key: { $in: ['office_lat', 'office_lng', 'geofence_radius'] } });
+        const settingsMap = settings.reduce((acc, s) => ({ ...acc, [s.key]: parseFloat(s.value) }), {});
+        
+        if (settingsMap.office_lat && settingsMap.office_lng && settingsMap.geofence_radius) {
+          const distance = getDistance(lat, lng, settingsMap.office_lat, settingsMap.office_lng);
+          if (distance > settingsMap.geofence_radius) {
+            return res.json({ success: false, message: `Check-in failed: You are ${Math.round(distance)}m away from the office. Must be within ${settingsMap.geofence_radius}m.` });
+          }
+        }
+      }
+
+      // Get settings for late threshold (enforcing 10:00 AM as requested)
+      const lateThreshold = '10:00';
       
-      const currentTimeStr = now.getHours().toString().padStart(2, '0') + ':' + 
-                             now.getMinutes().toString().padStart(2, '0');
+      const currentTimeStr = localDate.getHours().toString().padStart(2, '0') + ':' + 
+                             localDate.getMinutes().toString().padStart(2, '0');
       
       let status = 'Present';
-      if (currentTimeStr > lateThreshold) {
+      if (currentTimeStr >= '13:30') {
+        status = 'Half Day';
+      } else if (currentTimeStr > lateThreshold) {
         status = 'Late';
       }
 
@@ -109,8 +143,92 @@ export const checkIn = async (req, res) => {
       });
       return res.json({ success: true, attendance, alreadyCheckedIn: false });
     }
-    // Already checked in
+    
+    // Already checked in. If they re-enter geofence, clear the lastExitTime.
+    if (attendance.lastExitTime) {
+      attendance.lastExitTime = null;
+      await attendance.save();
+    }
+    
     return res.json({ success: true, attendance, alreadyCheckedIn: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const checkOut = async (req, res) => {
+  const { employeeId } = req.body;
+  const now = new Date();
+  
+  const tzStr = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+  const localDate = new Date(tzStr);
+  
+  const year = localDate.getFullYear();
+  const month = String(localDate.getMonth() + 1).padStart(2, '0');
+  const day = String(localDate.getDate()).padStart(2, '0');
+  const today = `${year}-${month}-${day}`;
+  
+  try {
+    let attendance = await Attendance.findOne({ employeeId, date: today });
+    if (!attendance) {
+      return res.status(404).json({ success: false, message: 'No check-in record found for today.' });
+    }
+    
+    // Calculate work hours
+    const checkOutTime = now;
+    if (attendance.checkIn) {
+      const diffMs = checkOutTime - new Date(attendance.checkIn);
+      const mins = Math.floor(diffMs / (1000 * 60));
+      const workHours = `${Math.floor(mins / 60)}h ${mins % 60}m`;
+
+      attendance.checkOut = checkOutTime;
+      attendance.workHours = workHours;
+      attendance.workStatus = 'Completed';
+      attendance.lastExitTime = null; // Clear it just in case
+
+      const checkOutTimeStr = localDate.getHours().toString().padStart(2, '0') + ':' + 
+                              localDate.getMinutes().toString().padStart(2, '0');
+
+      // Automatically mark as Half Day if worked less than 4 hours or checked out before 6:30 PM
+      if ((Math.floor(mins / 60) < 4 || checkOutTimeStr < '18:30') && attendance.status !== 'Absent') {
+        attendance.status = 'Half Day';
+      }
+
+      await attendance.save();
+    }
+
+    return res.json({ success: true, attendance, message: 'Checked out successfully.' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const markGeofenceExit = async (req, res) => {
+  const { employeeId } = req.body;
+  const now = new Date();
+  
+  const tzStr = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+  const localDate = new Date(tzStr);
+  
+  const year = localDate.getFullYear();
+  const month = String(localDate.getMonth() + 1).padStart(2, '0');
+  const day = String(localDate.getDate()).padStart(2, '0');
+  const today = `${year}-${month}-${day}`;
+  
+  try {
+    let attendance = await Attendance.findOne({ employeeId, date: today });
+    if (!attendance) {
+      return res.status(404).json({ success: false, message: 'No check-in record found for today.' });
+    }
+    
+    // Only set it if they haven't checked out
+    if (!attendance.checkOut) {
+      attendance.lastExitTime = now;
+      await attendance.save();
+      return res.json({ success: true, message: 'Geofence exit marked, 1-hour grace period started.' });
+    }
+    
+    return res.json({ success: true, message: 'Already checked out.' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -119,7 +237,9 @@ export const checkIn = async (req, res) => {
 export const getTodayAttendance = async (req, res) => {
   try {
     const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const tzStr = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+    const localDate = new Date(tzStr);
+    const today = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, '0')}-${String(localDate.getDate()).padStart(2, '0')}`;
     const attendance = await Attendance.findOne({ employeeId: req.params.employeeId, date: today });
     res.json({ success: true, attendance });
   } catch (error) {
@@ -145,17 +265,11 @@ export const getStats = async (req, res) => {
     const settingsMap = settings.reduce((acc, s) => ({ ...acc, [s.key]: parseFloat(s.value) }), {});
     const totalLeaveQuota = (settingsMap.casual_leave || 12) + (settingsMap.sick_leave || 10);
 
-    // Present days (attendance records in period)
+    // Present days — includes Late (Late = present but arrived after threshold)
     const presentDays = await Attendance.countDocuments({
       employeeId,
-      date: { $regex: dateRegex }
-    });
-
-    // Late comings in period
-    const lateComings = await Attendance.countDocuments({
-      employeeId,
       date: { $regex: dateRegex },
-      status: 'Late'
+      status: { $in: ['Present', 'Late'] }
     });
 
     // Half days in period
@@ -165,35 +279,29 @@ export const getStats = async (req, res) => {
       status: 'Half Day'
     });
 
-    // Working days in the period (Mon-Fri count)
-    const startDate = isYearly
-      ? new Date(`${targetYear}-01-01`)
-      : new Date(`${targetYear}-${targetMonth}-01`);
-    const endDate = isYearly
-      ? new Date(`${targetYear}-12-31`)
-      : new Date(targetYear, parseInt(targetMonth), 0); // last day of month
+    // Working days in the period (Mon-Sat count, exclude Sundays)
+    const startDate = isYearly ? new Date(`${targetYear}-01-01`) : new Date(`${targetYear}-${targetMonth}-01`);
+    const endDate = isYearly ? new Date(`${targetYear}-12-31`) : new Date(targetYear, parseInt(targetMonth), 0);
     const effectiveEnd = endDate > now ? now : endDate;
-
     let workingDays = 0;
     const d = new Date(startDate);
     while (d <= effectiveEnd) {
       const day = d.getDay();
-      if (day !== 0 && day !== 6) workingDays++;
+      if (day !== 0) workingDays++; // exclude Sundays (0), keep Monday-Saturday
       d.setDate(d.getDate() + 1);
     }
 
-    // Leaves taken in period (approved leaves)
+    // Leaves taken in period (approved leaves overlapping period)
     const formatDate = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     const periodStart = formatDate(startDate);
     const periodEnd = formatDate(effectiveEnd);
+    const empObjId = mongoose.Types.ObjectId.isValid(employeeId) ? new mongoose.Types.ObjectId(employeeId) : employeeId;
     const approvedLeaves = await LeaveRequest.find({
-      employeeId,
+      employeeId: empObjId,
       status: 'APPROVED',
       fromDate: { $lte: periodEnd },
       toDate: { $gte: periodStart }
     });
-
-    // Count leave days (each leave request, count overlap days)
     let leavesTaken = 0;
     for (const leave of approvedLeaves) {
       const lStart = new Date(Math.max(new Date(leave.fromDate), startDate));
@@ -201,18 +309,29 @@ export const getStats = async (req, res) => {
       const diffDays = Math.round((lEnd - lStart) / (1000 * 60 * 60 * 24)) + 1;
       if (diffDays > 0) leavesTaken += diffDays;
     }
-
-    // Pending leave requests (all time - sum of days)
+    // Pending leave requests
     const pendingLeavesResult = await LeaveRequest.aggregate([
       { 
         $match: { 
-          employeeId: mongoose.Types.ObjectId.isValid(employeeId) ? new mongoose.Types.ObjectId(employeeId) : employeeId, 
+          employeeId: empObjId, 
           status: 'PENDING' 
         } 
       },
       { $group: { _id: null, totalDays: { $sum: '$days' } } }
     ]);
     const pendingLeaves = pendingLeavesResult.length > 0 ? pendingLeavesResult[0].totalDays : 0;
+
+    // Rejected leave requests (all time - sum of days)
+    const rejectedLeavesResult = await LeaveRequest.aggregate([
+      { 
+        $match: { 
+          employeeId: empObjId, 
+          status: 'REJECTED' 
+        } 
+      },
+      { $group: { _id: null, totalDays: { $sum: '$days' } } }
+    ]);
+    const rejectedLeaves = rejectedLeavesResult.length > 0 ? rejectedLeavesResult[0].totalDays : 0;
 
     // Absent = working days - present - half days - leaves taken
     const absentDays = Math.max(0, workingDays - presentDays - halfDays - leavesTaken);
@@ -224,10 +343,7 @@ export const getStats = async (req, res) => {
     const approvedThisYearResult = await LeaveRequest.aggregate([
       { 
         $match: { 
-          $or: [
-            { employeeId: mongoose.Types.ObjectId.isValid(employeeId) ? new mongoose.Types.ObjectId(employeeId) : null },
-            { employeeId: employeeId }
-          ],
+          employeeId: empObjId,
           status: 'APPROVED',
           fromDate: { $lte: yearEnd },
           toDate: { $gte: yearStart }
@@ -243,15 +359,17 @@ export const getStats = async (req, res) => {
       success: true,
       stats: {
         presentDays,
-        lateComings,
         halfDays,
         leavesTaken,
-        leavesTakenYearly: totalApprovedDaysThisYear,
-        pendingLeaves,
         absentDays,
         workingDays,
-        availableLeaves,
-        totalLeaveQuota
+        attendanceRate: ((presentDays + halfDays * 0.5) / workingDays * 100).toFixed(2),
+        attendanceBreakdown: {
+          present: ((presentDays / workingDays) * 100).toFixed(2),
+          absent: ((absentDays / workingDays) * 100).toFixed(2),
+          halfDay: ((halfDays / workingDays) * 100).toFixed(2),
+          leave: ((leavesTaken / workingDays) * 100).toFixed(2)
+        }
       }
     });
   } catch (error) {
@@ -259,10 +377,69 @@ export const getStats = async (req, res) => {
   }
 };
 
+export const getLateCount = async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const count = await Attendance.countDocuments({
+      employeeId,
+      status: 'Late'
+    });
+    res.json({ success: true, count });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 export const applyLeave = async (req, res) => {
   try {
-    const leave = await LeaveRequest.create(req.body);
+    const { employeeId, leaveType, fromDate, toDate, reason } = req.body;
+
+    if (!employeeId || !leaveType || !fromDate || !toDate || !reason) {
+      return res.status(400).json({ success: false, message: 'All fields are required.' });
+    }
+
+    // Validate employeeId is a valid ObjectId
+    if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+      return res.status(400).json({ success: false, message: 'Invalid employee ID.' });
+    }
+
+    // Calculate number of days between fromDate and toDate (inclusive)
+    const start = new Date(fromDate);
+    const end = new Date(toDate);
+    if (isNaN(start) || isNaN(end) || end < start) {
+      return res.status(400).json({ success: false, message: 'Invalid date range.' });
+    }
+    const days = Math.round((end - start) / (1000 * 60 * 60 * 24)) + 1;
+
+    const formatDate = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    const formattedFromDate = formatDate(start);
+    const formattedToDate = formatDate(end);
+
+    const leave = await LeaveRequest.create({
+      employeeId: new mongoose.Types.ObjectId(employeeId),
+      leaveType,
+      fromDate: formattedFromDate,
+      toDate: formattedToDate,
+      days,
+      reason
+    });
     res.json({ success: true, leave });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getMyLeaves = async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    
+    // Build query — cast to ObjectId if valid, otherwise try string match
+    const query = mongoose.Types.ObjectId.isValid(employeeId)
+      ? { employeeId: new mongoose.Types.ObjectId(employeeId) }
+      : { employeeId };
+    
+    const leaves = await LeaveRequest.find(query).sort({ appliedOn: -1 }).limit(20);
+    res.json({ success: true, leaves });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -346,6 +523,116 @@ export const getWeeklyTasks = async (req, res) => {
     });
     
     res.json({ success: true, tasks });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ── Employee Notes (messages to admin) ───────────────────────────────────────
+
+export const submitNote = async (req, res) => {
+  try {
+    const { employeeId, message } = req.body;
+    if (!employeeId || !message || !message.trim()) {
+      return res.status(400).json({ success: false, message: 'Employee ID and message are required.' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+      return res.status(400).json({ success: false, message: 'Invalid employee ID.' });
+    }
+    const note = await Note.create({
+      employeeId: new mongoose.Types.ObjectId(employeeId),
+      message: message.trim(),
+    });
+    res.json({ success: true, note });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getMyNotes = async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const query = mongoose.Types.ObjectId.isValid(employeeId)
+      ? { employeeId: new mongoose.Types.ObjectId(employeeId) }
+      : { employeeId };
+    const notes = await Note.find(query).sort({ createdAt: -1 }).limit(50);
+    res.json({ success: true, notes });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ── Resignations ────────────────────────────────────────────────────────────
+
+export const submitResignation = async (req, res) => {
+  try {
+    const { employeeId, resignationDate, lastWorkingDay, reason, comments } = req.body;
+    
+    if (!employeeId || !resignationDate || !reason) {
+      return res.status(400).json({ success: false, message: 'Required fields are missing.' });
+    }
+    
+    if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+      return res.status(400).json({ success: false, message: 'Invalid employee ID.' });
+    }
+    
+    // Check if there is already an active resignation
+    const existing = await Resignation.findOne({ 
+      employeeId: new mongoose.Types.ObjectId(employeeId),
+      status: { $in: ['PENDING', 'APPROVED'] }
+    });
+    
+    if (existing) {
+      return res.status(400).json({ success: false, message: 'You already have an active resignation request.' });
+    }
+    
+    const payload = {
+      employeeId: new mongoose.Types.ObjectId(employeeId),
+      resignationDate,
+      lastWorkingDay,
+      reason,
+      comments,
+      submittedOn: new Date()
+    };
+    
+    if (req.file) {
+      payload.attachment = req.file.path;
+    }
+    
+    const resignation = await Resignation.create(payload);
+    res.json({ success: true, resignation });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getMyResignations = async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const query = mongoose.Types.ObjectId.isValid(employeeId)
+      ? { employeeId: new mongoose.Types.ObjectId(employeeId) }
+      : { employeeId };
+      
+    const resignations = await Resignation.find(query).sort({ submittedOn: -1 });
+    res.json({ success: true, resignations });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getResignationById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid resignation ID.' });
+    }
+    
+    const resignation = await Resignation.findById(id).populate('employeeId', 'fullName empCode email department role profileImage');
+    if (!resignation) {
+      return res.status(404).json({ success: false, message: 'Resignation not found.' });
+    }
+    
+    res.json({ success: true, resignation });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

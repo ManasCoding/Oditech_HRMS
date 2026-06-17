@@ -5,6 +5,7 @@ import Employee from '../models/Employee.js';
 import ActivityLog from '../models/ActivityLog.js';
 import transporter from '../config/transporter.js';
 import otpStore from '../utils/otpStore.js';
+import SystemSetting from '../models/SystemSetting.js';
 
 export const login = async (req, res) => {
   const { loginId, password, isAdmin } = req.body;
@@ -29,6 +30,18 @@ export const login = async (req, res) => {
     if (isAdmin) {
       const admin = await Admin.findOne({ email: loginId });
       if (admin && await bcrypt.compare(password, admin.password)) {
+        // Check maintenance mode for admin (only bypass gumansingh.oditechglobal@gmail.com)
+        const maintenanceSetting = await SystemSetting.findOne({ key: 'maintenance_mode' });
+        if (maintenanceSetting && (maintenanceSetting.value === 'true' || maintenanceSetting.value === true)) {
+          if (admin.email !== 'gumansingh.oditechglobal@gmail.com') {
+            const maintenanceMessage = await SystemSetting.findOne({ key: 'maintenance_message' });
+            return res.status(503).json({
+              success: false,
+              message: maintenanceMessage?.value || 'System is currently undergoing maintenance. Please try again later.'
+            });
+          }
+        }
+
         await ActivityLog.create({ 
           adminId: admin._id, 
           action: 'Login', 
@@ -57,6 +70,16 @@ export const login = async (req, res) => {
     } else {
       const employee = await Employee.findOne({ $or: [{ email: loginId }, { empCode: loginId }] });
       if (employee && employee.password === password) {
+        // Check maintenance mode
+        const maintenanceSetting = await SystemSetting.findOne({ key: 'maintenance_mode' });
+        if (maintenanceSetting && (maintenanceSetting.value === 'true' || maintenanceSetting.value === true)) {
+          const maintenanceMessage = await SystemSetting.findOne({ key: 'maintenance_message' });
+          return res.status(503).json({
+            success: false,
+            message: maintenanceMessage?.value || 'System is currently undergoing maintenance. Please try again later.'
+          });
+        }
+
         await ActivityLog.create({ 
           employeeId: employee._id, 
           action: 'Login', 

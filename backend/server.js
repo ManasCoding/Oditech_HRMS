@@ -6,6 +6,8 @@ import dotenv from 'dotenv';
 import connectDB from './db.js';
 import Admin from './models/Admin.js';
 import SystemSetting from './models/SystemSetting.js';
+import Attendance from './models/Attendance.js';
+import { initCronJobs } from './utils/cronJobs.js';
 
 // Route Imports
 import authRoutes from './routes/authRoutes.js';
@@ -16,7 +18,7 @@ import publicRoutes from './routes/publicRoutes.js';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 7000;
+const PORT = process.env.PORT || 5000;
 
 // Security Middleware
 app.use(helmet({
@@ -24,18 +26,46 @@ app.use(helmet({
 }));
 
 // Middleware
-app.use(cors());
+
+// ── CORS ────────────────────────────────────────────────────────────────────
+// Allow all origins so the React Native / Expo mobile app can connect from
+// any local-network IP, emulator, or physical device.
+// In production you can lock this down to specific domains.
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, Postman) and any HTTP origin
+    callback(null, true);
+  },
+  credentials: true,
+}));
+
 app.use(express.json());
+
+// Request Logger
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  next();
+});
 
 // Seed Default Admin & Settings
 const seedData = async () => {
   try {
     // Admin
-    const targetEmail = 'gumansingh.oditechglobal@gmail.com';
-    if (!(await Admin.findOne({ email: targetEmail }))) {
-      const hashedPassword = await bcrypt.hash('123456', 10);
-      await Admin.create({ fullName: 'Guman Singh', email: targetEmail, password: hashedPassword });
-      console.log(`Admin seeded: ${targetEmail}`);
+    const admins = [
+      { fullName: 'Guman Singh', email: 'gumansingh.oditechglobal@gmail.com', password: '123456' },
+      { fullName: 'Oditech Official', email: 'oditechofficial@gmail.com', password: '123456' }
+    ];
+
+    for (const adminData of admins) {
+      if (!(await Admin.findOne({ email: adminData.email }))) {
+        const hashedPassword = await bcrypt.hash(adminData.password, 10);
+        await Admin.create({ 
+          fullName: adminData.fullName, 
+          email: adminData.email, 
+          password: hashedPassword 
+        });
+        console.log(`Admin seeded: ${adminData.email}`);
+      }
     }
 
     // Default Settings
@@ -48,7 +78,9 @@ const seedData = async () => {
       { key: 'sick_leave', value: 10 },
       { key: 'office_lat', value: 20.2961 },
       { key: 'office_lng', value: 85.8331 },
-      { key: 'geofence_radius', value: 50 }
+      { key: 'geofence_radius', value: 50 },
+      { key: 'maintenance_mode', value: 'false' },
+      { key: 'maintenance_message', value: 'System will be offline for 2 hours.' }
     ];
 
     for (const setting of defaultSettings) {
@@ -63,7 +95,14 @@ const seedData = async () => {
   }
 };
 
-connectDB().then(seedData);
+connectDB().then(() => {
+  seedData();
+  initCronJobs();
+});
+
+app.get("/", (req, res) => {
+  res.send("Working on Render 🚀");
+});
 
 // Routes
 app.use('/api', authRoutes); // Includes /login, /auth/forgot-password etc.
@@ -71,8 +110,61 @@ app.use('/api/employee', employeeRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api', publicRoutes); // Includes /notifications, /settings
 
-if (process.env.NODE_ENV !== 'production') {
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-}
+// if (process.env.NODE_ENV !== 'production') {
+//   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// }
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+// Auto Check-out background job (runs every 5 minutes)
+const checkAutoCheckout = async () => {
+  try {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+    // Find all attendance records with a lastExitTime older than 1 hour and no checkOut
+    const attendances = await Attendance.find({
+      checkOut: { $exists: false },
+      lastExitTime: { $lt: oneHourAgo, $ne: null }
+    });
+
+    for (let att of attendances) {
+      if (!att.checkOut && att.lastExitTime) {
+        const checkOutTime = att.lastExitTime;
+        let workHours = att.workHours;
+        let mins = 0;
+        if (att.checkIn) {
+          const diffMs = checkOutTime - new Date(att.checkIn);
+          mins = Math.floor(diffMs / (1000 * 60));
+          workHours = `${Math.floor(mins / 60)}h ${mins % 60}m`;
+        }
+        
+        att.checkOut = checkOutTime;
+        att.workHours = workHours;
+        att.workStatus = 'Completed';
+
+        // Automatically mark as Half Day if worked less than 4 hours
+        if (mins > 0 && Math.floor(mins / 60) < 4 && att.status !== 'Absent') {
+          att.status = 'Half Day';
+        }
+
+        await att.save();
+        console.log(`Auto-checked out employee ${att.employeeId} at ${checkOutTime} (${workHours})`);
+      }
+    }
+  } catch (error) {
+    console.error('Error running auto checkout job:', error.message);
+  }
+};
+
+setInterval(checkAutoCheckout, 5 * 60 * 1000);
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use.`);
+  } else {
+    console.error('Server error:', err);
+  }
+});
 
 export default app;

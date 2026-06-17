@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Employee Login QR Code</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: white;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        .card {
+            background: white;
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.05);
+            text-align: center;
+            border: 1px solid #e2e8f0;
+        }
+        h2 {
+            color: #1e293b;
+            margin-top: 0;
+            margin-bottom: 10px;
+        }
+        p {
+            color: #64748b;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        .qr-container {
+            background: white;
+            padding: 15px;
+            border-radius: 15px;
+            display: inline-block;
+            border: 2px dashed #cbd5e1;
+        }
+        .print-btn {
+            margin-top: 30px;
+            background: #2563eb;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .print-btn:hover {
+            background: #1d4ed8;
+        }
+        @media print {
+            body { background: white; }
+            .card { box-shadow: none; border: none; }
+            .print-btn { display: none; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h2>Oditech HRMS</h2>
+        <p>Scan this code to log in as an Employee</p>
+        
+        <div class="qr-container">
+            <!-- Using the free QR Server API to generate a QR Code pointing to the login page -->
+            <img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=https://oditech-hrms-frontend.vercel.app/login&bgcolor=ffffff" alt="Login QR Code">
+        </div>
+
+        <br>
+        <button class="print-btn" onclick="window.print()">Print QR Code</button>
+    </div>
+
+</body>
+</html>

@@ -13,6 +13,7 @@ const AttendanceSchema = new mongoose.Schema({
     lat: Number,
     lng: Number
   },
+  lastExitTime: { type: Date },
   remarks: { type: String }
 }, { timestamps: true });
 
