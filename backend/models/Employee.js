@@ -10,7 +10,32 @@ const EmployeeSchema = new mongoose.Schema({
   joinDate: { type: Date, default: Date.now },
   profileImage: { type: String },
   role: { type: String, default: 'Team Member' },
-  password: { type: String, default: '123456' }
+  password: { type: String, default: '123456' },
+  
+  // Employment Journey
+  employmentType: { type: String, default: 'Regular' },
+  employmentHistory: [{
+    empCode: String,
+    employmentType: String,
+    designation: String,
+    department: String,
+    startDate: Date,
+    endDate: Date,
+    status: { type: String, default: 'Completed' },
+    salary: String,
+    reason: String
+  }],
+
+  
+  // Bank & Identity Details
+  accountHolderName: { type: String },
+  bankName: { type: String },
+  accountNumber: { type: String },
+  ifscCode: { type: String },
+  branchName: { type: String },
+  panNumber: { type: String },
+  aadharNumber: { type: String },
+  upiId: { type: String }
 }, { timestamps: true });
 
 export default mongoose.model('Employee', EmployeeSchema);

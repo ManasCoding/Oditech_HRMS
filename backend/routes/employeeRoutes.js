@@ -5,6 +5,7 @@ import {
   applyLeave, getMyLeaves, getTasks, createTask, createBulkTasks, getWeeklyTasks,
   submitNote, getMyNotes, submitResignation, getMyResignations, getResignationById
 } from '../controllers/employeeController.js';
+import { getMyLeaveBalance, getMyLeaveTransactions } from '../controllers/leaveAccrualController.js';
 import { upload } from '../cloudinary.js';
 
 const router = express.Router();
@@ -23,6 +24,8 @@ router.get('/stats/:employeeId', getStats);
 router.get('/late/count/:employeeId', getLateCount);
 router.post('/leaves', applyLeave);
 router.get('/leaves/:employeeId', getMyLeaves);
+router.get('/leaves/balance/:employeeId', getMyLeaveBalance);
+router.get('/leaves/transactions/:employeeId', getMyLeaveTransactions);
 router.get('/tasks/:employeeId/:date', getTasks);
 router.get('/tasks/weekly/:employeeId', getWeeklyTasks);
 router.post('/tasks', createTask);

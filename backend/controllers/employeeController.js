@@ -1,11 +1,15 @@
 import mongoose from 'mongoose';
 import Employee from '../models/Employee.js';
+import Notification from '../models/Notification.js';
 import Attendance from '../models/Attendance.js';
-import LeaveRequest from '../models/LeaveRequest.js';
-import Task from '../models/Task.js';
-import SystemSetting from '../models/SystemSetting.js';
 import Note from '../models/Note.js';
+import Task from '../models/Task.js';
+import { getIo } from '../socket.js';
+import SystemSetting from '../models/SystemSetting.js';
 import Resignation from '../models/Resignation.js';
+import LeaveRequest from '../models/LeaveRequest.js';
+import LeaveTransaction from '../models/LeaveTransaction.js';
+import { getLeaveBalance } from './leaveAccrualController.js';
 
 // Helper for distance calculation
 const getDistance = (lat1, lon1, lat2, lon2) => {
@@ -104,6 +108,11 @@ export const checkIn = async (req, res) => {
   const month = String(localDate.getMonth() + 1).padStart(2, '0');
   const day = String(localDate.getDate()).padStart(2, '0');
   const today = `${year}-${month}-${day}`;
+
+  // Block check-in on Sunday (day 0)
+  if (localDate.getDay() === 0) {
+    return res.json({ success: false, message: 'Today is Sunday — no attendance required.' });
+  }
   
   try {
     let attendance = await Attendance.findOne({ employeeId, date: today });
@@ -121,27 +130,59 @@ export const checkIn = async (req, res) => {
         }
       }
 
-      // Get settings for late threshold (enforcing 10:00 AM as requested)
-      const lateThreshold = '10:00';
+      // Official check-in threshold: 9:30 AM IST
+      const LATE_THRESHOLD = '09:30';
+      const HALF_DAY_THRESHOLD = '13:30';
       
-      const currentTimeStr = localDate.getHours().toString().padStart(2, '0') + ':' + 
-                             localDate.getMinutes().toString().padStart(2, '0');
+      const currentHour = localDate.getHours();
+      const currentMin  = localDate.getMinutes();
+      const currentTimeStr = String(currentHour).padStart(2, '0') + ':' + String(currentMin).padStart(2, '0');
+
+      // Calculate minutes late from 9:30 AM
+      const thresholdMins = 9 * 60 + 30; // 570
+      const currentTotalMins = currentHour * 60 + currentMin;
+      const lateMinutes = Math.max(0, currentTotalMins - thresholdMins);
       
       let status = 'Present';
-      if (currentTimeStr >= '13:30') {
+      let isLate = false;
+      let checkInApprovalStatus = 'Not Required';
+      let approvalRequestedAt = null;
+
+      if (currentTimeStr >= HALF_DAY_THRESHOLD) {
+        // After 1:30 PM — Half Day, requires approval too
         status = 'Half Day';
-      } else if (currentTimeStr > lateThreshold) {
+        isLate = true;
+        checkInApprovalStatus = 'Pending';
+        approvalRequestedAt = now;
+      } else if (currentTimeStr > '09:35') {
+        // After 9:35 AM — Mark automatic as Late, and show for approval
+        isLate = true;
+        checkInApprovalStatus = 'Pending';
+        approvalRequestedAt = now;
         status = 'Late';
+      } else if (currentTimeStr > LATE_THRESHOLD) {
+        // Between 9:30 AM and 9:35 AM — Grace period, mark as Present but flag as late, requires approval
+        isLate = true;
+        checkInApprovalStatus = 'Pending';
+        approvalRequestedAt = now;
+        status = 'Present';
       }
+      // else: on time — Present, no approval needed
 
       attendance = await Attendance.create({
         employeeId,
         date: today,
         checkIn: now,
         location: { lat, lng },
-        status
+        status,
+        isLate,
+        lateMinutes,
+        checkInApprovalStatus,
+        approvalRequestedAt
       });
-      return res.json({ success: true, attendance, alreadyCheckedIn: false });
+
+      const lateApprovalPending = checkInApprovalStatus === 'Pending';
+      return res.json({ success: true, attendance, alreadyCheckedIn: false, lateApprovalPending });
     }
     
     // Already checked in. If they re-enter geofence, clear the lastExitTime.
@@ -149,12 +190,17 @@ export const checkIn = async (req, res) => {
       attendance.lastExitTime = null;
       await attendance.save();
     }
+
+    // If approval was rejected, they should NOT be able to re-check in
+    // Return the existing record so the frontend can show the rejection UI
+    const lateApprovalPending = attendance.checkInApprovalStatus === 'Pending';
     
-    return res.json({ success: true, attendance, alreadyCheckedIn: true });
+    return res.json({ success: true, attendance, alreadyCheckedIn: true, lateApprovalPending });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 
 export const checkOut = async (req, res) => {
   const { employeeId } = req.body;
@@ -179,20 +225,21 @@ export const checkOut = async (req, res) => {
     if (attendance.checkIn) {
       const diffMs = checkOutTime - new Date(attendance.checkIn);
       const mins = Math.floor(diffMs / (1000 * 60));
-      const workHours = `${Math.floor(mins / 60)}h ${mins % 60}m`;
+      const totalHours = Math.floor(mins / 60);
+      const workHours = `${totalHours}h ${mins % 60}m`;
 
       attendance.checkOut = checkOutTime;
       attendance.workHours = workHours;
       attendance.workStatus = 'Completed';
-      attendance.lastExitTime = null; // Clear it just in case
+      attendance.lastExitTime = null;
 
-      const checkOutTimeStr = localDate.getHours().toString().padStart(2, '0') + ':' + 
-                              localDate.getMinutes().toString().padStart(2, '0');
-
-      // Automatically mark as Half Day if worked less than 4 hours or checked out before 6:30 PM
-      if ((Math.floor(mins / 60) < 4 || checkOutTimeStr < '18:30') && attendance.status !== 'Absent') {
+      // Mark as Half Day ONLY if worked less than 4 hours
+      // Do NOT use checkout time as a Half Day trigger — that was causing fake Half Day marks
+      // Preserve 'Late' status if the person was late but worked full hours (>= 4h)
+      if (totalHours < 4 && attendance.status !== 'Absent') {
         attendance.status = 'Half Day';
       }
+      // else: keep existing status (Present / Late) unchanged
 
       await attendance.save();
     }
@@ -339,7 +386,6 @@ export const getStats = async (req, res) => {
     // Available leaves = quota - total approved leave days this year
     const yearStart = `${targetYear}-01-01`;
     const yearEnd = `${targetYear}-12-31`;
-    
     const approvedThisYearResult = await LeaveRequest.aggregate([
       { 
         $match: { 
@@ -351,25 +397,28 @@ export const getStats = async (req, res) => {
       },
       { $group: { _id: null, totalDays: { $sum: '$days' } } }
     ]);
-    
     const totalApprovedDaysThisYear = approvedThisYearResult.length > 0 ? approvedThisYearResult[0].totalDays : 0;
     const availableLeaves = Math.max(0, totalLeaveQuota - totalApprovedDaysThisYear);
+
+    const lateCount = await Attendance.countDocuments({
+      employeeId,
+      date: { $regex: dateRegex },
+      $or: [{ status: 'Late' }, { isLate: true }]
+    });
 
     res.json({
       success: true,
       stats: {
+        workingDays,
         presentDays,
+        absentDays,
         halfDays,
         leavesTaken,
-        absentDays,
-        workingDays,
-        attendanceRate: ((presentDays + halfDays * 0.5) / workingDays * 100).toFixed(2),
-        attendanceBreakdown: {
-          present: ((presentDays / workingDays) * 100).toFixed(2),
-          absent: ((absentDays / workingDays) * 100).toFixed(2),
-          halfDay: ((halfDays / workingDays) * 100).toFixed(2),
-          leave: ((leavesTaken / workingDays) * 100).toFixed(2)
-        }
+        availableLeaves,
+        pendingLeaves,
+        rejectedLeaves,
+        attendanceRate: workingDays > 0 ? parseFloat(((presentDays + halfDays * 0.5) / workingDays * 100).toFixed(2)) : 0,
+        lateCount,
       }
     });
   } catch (error) {
@@ -398,18 +447,26 @@ export const applyLeave = async (req, res) => {
       return res.status(400).json({ success: false, message: 'All fields are required.' });
     }
 
-    // Validate employeeId is a valid ObjectId
     if (!mongoose.Types.ObjectId.isValid(employeeId)) {
       return res.status(400).json({ success: false, message: 'Invalid employee ID.' });
     }
 
-    // Calculate number of days between fromDate and toDate (inclusive)
     const start = new Date(fromDate);
     const end = new Date(toDate);
     if (isNaN(start) || isNaN(end) || end < start) {
       return res.status(400).json({ success: false, message: 'Invalid date range.' });
     }
     const days = Math.round((end - start) / (1000 * 60 * 60 * 24)) + 1;
+
+    // ── Earned leave balance check ───────────────────────────────────────
+    const availableBalance = await getLeaveBalance(employeeId);
+    if (availableBalance < days) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient leave balance. Available balance: ${availableBalance} day${availableBalance === 1 ? '' : 's'}.`
+      });
+    }
+    // ──────────────────────────────────────────────────────────────────
 
     const formatDate = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     const formattedFromDate = formatDate(start);
@@ -483,27 +540,83 @@ export const createTask = async (req, res) => {
 export const createBulkTasks = async (req, res) => {
   try {
     const { employeeId, tasks, dates, dailyRemarks, weeklyRemarks } = req.body;
-    
-    // 1. Delete existing tasks for these dates to avoid duplicates
-    await Task.deleteMany({ employeeId, date: { $in: dates } });
-    
-    // 2. Create new tasks
+
+    // ── Server-side time-lock validation (IST) ───────────────────────────────
+    // Convert server time to IST regardless of server timezone
+    const istNow   = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const todayIST = [
+      istNow.getFullYear(),
+      String(istNow.getMonth() + 1).padStart(2, '0'),
+      String(istNow.getDate()).padStart(2, '0'),
+    ].join('-');
+    const nowMinIST = istNow.getHours() * 60 + istNow.getMinutes();
+
+    // Parse "HH:MM" end-time from a slot key like "09:30 - 10:30"
+    // Hours 01-08 → PM (13-20),  09-12 → AM/noon
+    const slotEndMin = (slotKey) => {
+      const endStr = (slotKey || '').split(' - ')[1]?.trim() || '00:00';
+      const [h, m] = endStr.split(':').map(Number);
+      return ((h >= 1 && h <= 8) ? h + 12 : h) * 60 + m;
+    };
+
     if (tasks && tasks.length > 0) {
-      await Task.insertMany(tasks.map(t => ({ ...t, employeeId })));
-    }
-    
-    // 3. Update Attendance for these dates
-    for (const date of dates) {
-      const updateData = { workStatus: 'Completed' };
-      if (dailyRemarks && dailyRemarks[date]) {
-        updateData.remarks = dailyRemarks[date];
+      for (const task of tasks) {
+        // ── Date check ─────────────────────────────────────────────────────
+        if (task.date !== todayIST) {
+          return res.status(403).json({
+            success: false,
+            message: task.date < todayIST
+              ? `Timesheet for ${task.date} is locked. Past-date entries cannot be modified.`
+              : `Timesheet for ${task.date} is not yet available.`,
+          });
+        }
+
+        // ── Grace period check (slot end + 15 min) ─────────────────────────
+        const graceEndMin = slotEndMin(task.slotKey) + 15;
+        if (nowMinIST > graceEndMin) {
+          return res.status(403).json({
+            success: false,
+            message: `Slot "${task.slotKey}" is locked — the 15-minute grace period has expired.`,
+          });
+        }
       }
-      
+    }
+
+    // ── Safe upsert per task (never touches locked/past slots in DB) ─────────
+    if (tasks && tasks.length > 0) {
+      for (const task of tasks) {
+        await Task.findOneAndUpdate(
+          { employeeId, date: task.date, slotKey: task.slotKey },
+          { title: task.title, status: task.status || 'Completed', employeeId, date: task.date, slotKey: task.slotKey },
+          { upsert: true, new: true }
+        );
+      }
+    }
+
+    // ── Update attendance only for dates that have submitted content ──────────
+    const updatedDates = new Set((tasks || []).map(t => t.date));
+    // Also include today's date if it has daily remarks even without tasks
+    if (dailyRemarks) {
+      Object.keys(dailyRemarks).forEach(d => { if (d === todayIST) updatedDates.add(d); });
+    }
+
+    for (const date of updatedDates) {
+      const updateData = { workStatus: 'Completed' };
+      if (dailyRemarks?.[date]) updateData.remarks = dailyRemarks[date];
       await Attendance.findOneAndUpdate(
         { employeeId, date },
         updateData,
         { upsert: true, setDefaultsOnInsert: true }
       );
+    }
+
+    // Emit real-time event to Admin dashboard
+    const io = getIo();
+    if (io) {
+      io.emit('timesheetUpdated', { 
+        employeeId, 
+        dates: Array.from(updatedDates) 
+      });
     }
 
     res.json({ success: true, message: 'Tasks and remarks updated successfully' });

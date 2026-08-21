@@ -7,10 +7,17 @@ import Notification from '../models/Notification.js';
 import Document from '../models/Document.js';
 import Admin from '../models/Admin.js';
 import Note from '../models/Note.js';
+import AttendanceAuditLog from '../models/AttendanceAuditLog.js';
+import LeaveTransaction from '../models/LeaveTransaction.js';
+import { getLeaveBalance } from './leaveAccrualController.js';
+import mongoose from 'mongoose';
 import Resignation from '../models/Resignation.js';
+import Task from '../models/Task.js';
+import PerformanceRating from '../models/PerformanceRating.js';
 import bcrypt from 'bcrypt';
 import exceljs from 'exceljs';
 import PDFDocument from 'pdfkit';
+import { getIo } from '../socket.js';
 
 export const getEmployees = async (req, res) => {
   try {
@@ -47,6 +54,47 @@ export const createEmployee = async (req, res) => {
       return res.status(400).json({ success: false, message });
     }
     res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+export const upgradeEmployee = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { employmentType, empCode, role, department, effectiveDate, salary, reason } = req.body;
+
+    const employee = await Employee.findById(id);
+    if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
+
+    // Ensure empCode isn't taken by someone else
+    if (empCode !== employee.empCode) {
+      const existing = await Employee.findOne({ empCode });
+      if (existing) return res.status(400).json({ success: false, message: 'New Employee ID is already in use.' });
+    }
+
+    // Push current state to history
+    employee.employmentHistory.push({
+      empCode: employee.empCode,
+      employmentType: employee.employmentType,
+      designation: employee.role,
+      department: employee.department,
+      startDate: employee.joinDate,
+      endDate: effectiveDate ? new Date(effectiveDate) : new Date(),
+      status: 'Completed',
+      reason: reason || 'Upgraded'
+    });
+
+    // Update main record
+    employee.empCode = empCode || employee.empCode;
+    employee.employmentType = employmentType || employee.employmentType;
+    employee.role = role || employee.role;
+    employee.department = department || employee.department;
+    if (effectiveDate) employee.joinDate = new Date(effectiveDate);
+    // Assuming salary is kept somewhere else or we can add it, we push to history above.
+
+    await employee.save();
+    res.json({ success: true, employee });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -106,22 +154,44 @@ export const getStats = async (req, res) => {
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     const targetDate = req.query.date || today;
     
-    const totalEmployees = await Employee.countDocuments({ status: 'Active' });
-    const presentToday = await Attendance.countDocuments({ date: targetDate, status: { $in: ['Present', 'Late'] } });
-    const halfDayToday = await Attendance.countDocuments({ date: targetDate, status: 'Half Day' });
-    const lateToday = await Attendance.countDocuments({ date: targetDate, status: 'Late' });
-    const leavesToday = await LeaveRequest.countDocuments({ 
+    const employees = await Employee.find({ status: 'Active' });
+    const attendances = await Attendance.find({ date: targetDate });
+    const leaves = await LeaveRequest.find({ 
       status: 'APPROVED', 
       fromDate: { $lte: targetDate }, 
       toDate: { $gte: targetDate } 
     });
-    const totalPresent = presentToday + halfDayToday;
-    const absentToday = Math.max(0, totalEmployees - totalPresent - leavesToday);
-    
+
+    let presentToday = 0;
+    let halfDayToday = 0;
+    let lateToday = 0;
+    let leavesToday = 0;
+    let absentToday = 0;
+
+    employees.forEach(emp => {
+      const att = attendances.find(a => a.employeeId.toString() === emp._id.toString());
+      const leave = leaves.find(l => l.employeeId.toString() === emp._id.toString());
+
+      if (att) {
+        if (att.status === 'Present' || att.status === 'Late') {
+          presentToday++;
+          if (att.status === 'Late') lateToday++;
+        } else if (att.status === 'Half Day') {
+          halfDayToday++;
+        } else if (att.status === 'Absent') {
+          absentToday++;
+        }
+      } else if (leave) {
+        leavesToday++;
+      } else {
+        absentToday++;
+      }
+    });
+
     res.json({
       success: true,
       stats: {
-        totalEmployees,
+        totalEmployees: employees.length,
         presentToday,
         halfDayToday,
         lateToday,
@@ -205,15 +275,56 @@ export const updateLeaveStatus = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Status is required' });
     }
 
+    // Fetch old leave first so we know previous status for reversal logic
+    const oldLeave = await LeaveRequest.findById(req.params.id);
+    if (!oldLeave) {
+      return res.status(404).json({ success: false, message: 'Leave request not found' });
+    }
+
     const leave = await LeaveRequest.findByIdAndUpdate(
       req.params.id, 
       { status, approvedBy, approvedOn: new Date() },
       { new: true }
     );
 
-    if (!leave) {
-      return res.status(404).json({ success: false, message: 'Leave request not found' });
+    const empId = leave.employeeId;
+
+    // ── Record leave transaction for earned leave balance tracking ────────────
+    try {
+      if (status === 'APPROVED' && oldLeave.status !== 'APPROVED') {
+        // Deduct from earned leave balance
+        const currentBalance = await getLeaveBalance(empId.toString());
+        const newBalance = currentBalance - leave.days;
+        await LeaveTransaction.create({
+          employeeId: empId,
+          transactionType: 'LEAVE_USED',
+          amount: -leave.days,
+          leaveType: leave.leaveType,
+          leaveRequestId: leave._id,
+          reason: `Approved leave: ${leave.leaveType} from ${leave.fromDate} to ${leave.toDate}`,
+          balanceAfterTransaction: Math.max(0, newBalance),
+          createdBy: approvedBy || null
+        });
+      } else if (status === 'REJECTED' && oldLeave.status === 'APPROVED') {
+        // Reverse a previously approved leave — restore balance
+        const currentBalance = await getLeaveBalance(empId.toString());
+        const newBalance = currentBalance + leave.days;
+        await LeaveTransaction.create({
+          employeeId: empId,
+          transactionType: 'LEAVE_REVERSAL',
+          amount: leave.days,
+          leaveType: leave.leaveType,
+          leaveRequestId: leave._id,
+          reason: `Leave reversed/rejected: ${leave.leaveType} from ${leave.fromDate} to ${leave.toDate}`,
+          balanceAfterTransaction: newBalance,
+          createdBy: approvedBy || null
+        });
+      }
+    } catch (txErr) {
+      // Non-critical: log but don't fail the leave status update
+      console.error('LeaveTransaction record error:', txErr.message);
     }
+    // ───────────────────────────────────────────────────────────────────
 
     res.json({ success: true, leave });
   } catch (error) {
@@ -299,6 +410,39 @@ export const deleteAdmin = async (req, res) => {
   try {
     await Admin.findByIdAndDelete(req.params.id);
     res.json({ success: true, message: 'Administrator removed' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const checkAdminEmail = async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
+  try {
+    const admin = await Admin.findOne({ email }, '-password');
+    if (admin) {
+      res.json({ exists: true, admin });
+    } else {
+      res.json({ exists: false });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateAdmin = async (req, res) => {
+  const { id } = req.params;
+  const { fullName, email, password } = req.body;
+  try {
+    let updateData = { fullName, email };
+    
+    if (password) {
+      updateData.password = await bcrypt.hash(password, 10);
+    }
+    
+    const admin = await Admin.findByIdAndUpdate(id, updateData, { new: true, select: '-password' });
+    if (!admin) return res.status(404).json({ success: false, message: 'Admin not found' });
+    res.json({ success: true, message: 'Administrator account updated successfully', admin });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -404,6 +548,11 @@ export const getHourlyReports = async (req, res) => {
       NotSubmitted: totalEmployees - await Attendance.countDocuments({ date: targetDate })
     };
 
+    // Filter out employees who have already been rated for the target date
+    const ratedRecords = await PerformanceRating.find({ workDate: new Date(targetDate) }).select('employeeId');
+    const ratedEmployeeIds = new Set(ratedRecords.map(r => r.employeeId.toString()));
+    const unratedAttendances = attendances.filter(a => a.employeeId && !ratedEmployeeIds.has(a.employeeId._id.toString()));
+
     res.json({
       success: true,
       stats: {
@@ -412,8 +561,8 @@ export const getHourlyReports = async (req, res) => {
         averageHours,
         totalOvertimeToday
       },
-      reports: attendances,
-      totalEntries,
+      reports: unratedAttendances,
+      totalEntries: unratedAttendances.length,
       summary: summaryData,
       statusCounts
     });
@@ -709,8 +858,8 @@ export const updateEmployeeCheckIn = async (req, res) => {
     // checkInTime is "HH:mm"
     const checkInDate = new Date(`${date}T${checkInTime}:00`);
     
-    // Late threshold: 10:00 AM
-    const lateThreshold = new Date(`${date}T10:00:00`);
+    // Late threshold: 9:30 AM (consistent with employee self-check-in)
+    const lateThreshold = new Date(`${date}T09:30:00`);
     const status = checkInDate > lateThreshold ? 'Late' : 'Present';
 
     let record = await Attendance.findOne({ employeeId, date });
@@ -769,6 +918,118 @@ export const updateEmployeeCheckOut = async (req, res) => {
         workStatus: 'Pending'
       });
     }
+
+    res.json({ success: true, record });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateAttendanceStatus = async (req, res) => {
+  try {
+    const { employeeId, date, status } = req.body;
+    
+    if (!employeeId || !date || !status) {
+      return res.status(400).json({ success: false, message: 'Missing required fields' });
+    }
+
+    let formattedDate = date;
+    if (formattedDate.includes('T')) {
+      formattedDate = formattedDate.split('T')[0];
+    }
+
+    const record = await Attendance.findOneAndUpdate(
+      { employeeId, date: formattedDate },
+      { 
+        $set: { 
+          status,
+          workStatus: 'Pending'
+        } 
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    res.json({ success: true, record });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateAttendanceRecord = async (req, res) => {
+  try {
+    const { id } = req.params; // Can be 'new' or valid ObjectId
+    const { status, employeeId, date } = req.body;
+    
+    // Auth Check: We assume the route is protected or we check headers
+    // In a full implementation, you'd verify req.user.role === 'admin'
+    
+    if (!status) {
+      return res.status(400).json({ success: false, message: 'Status is required' });
+    }
+
+    const validStatuses = ['Present', 'Absent', 'Half Day', 'Late', 'Paid Leave', 'Unpaid Leave', 'Holiday', 'Weekend'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ success: false, message: 'Invalid status value' });
+    }
+
+    let record;
+    let oldStatus = 'Absent';
+
+    if (id !== 'new') {
+      record = await Attendance.findById(id);
+      if (!record) {
+        return res.status(404).json({ success: false, message: 'Attendance record not found' });
+      }
+      // Date cannot be in the future
+      if (new Date(record.date) > new Date()) {
+        return res.status(400).json({ success: false, message: 'Cannot update future attendance dates' });
+      }
+      oldStatus = record.status || 'Absent';
+      record.status = status;
+      await record.save();
+    } else {
+      if (!employeeId || !date) {
+        return res.status(400).json({ success: false, message: 'Employee ID and Date are required for new records' });
+      }
+      if (new Date(date) > new Date()) {
+        return res.status(400).json({ success: false, message: 'Cannot update future attendance dates' });
+      }
+      
+      // Force date to YYYY-MM-DD
+      let formattedDate = date;
+      if (formattedDate.includes('T')) {
+        formattedDate = formattedDate.split('T')[0];
+      }
+      
+      const existing = await Attendance.findOne({ employeeId, date: formattedDate });
+      oldStatus = existing ? (existing.status || 'Absent') : 'Absent';
+
+      record = await Attendance.findOneAndUpdate(
+        { employeeId, date: formattedDate },
+        { 
+          $set: { 
+            status,
+            workStatus: 'Pending'
+          } 
+        },
+        { new: true, upsert: true, setDefaultsOnInsert: true }
+      );
+    }
+    
+    // Create Audit Log
+    // For updatedBy, we can parse from token or simply pass it in body if token parsing isn't setup
+    // Using a placeholder for now if updatedBy isn't provided
+    const updatedBy = req.body.updatedBy || null;
+
+    await AttendanceAuditLog.create({
+      employeeId: record.employeeId,
+      attendanceId: record._id,
+      attendanceDate: record.date,
+      oldStatus,
+      newStatus: status,
+      updatedBy,
+      reason: "Manual Admin Update"
+    });
 
     res.json({ success: true, record });
   } catch (error) {
@@ -835,3 +1096,172 @@ export const updateResignationStatus = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+// ── Admin: Read employee's submitted timesheet tasks for a given date ─────────
+export const getEmployeeTasksByDate = async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const { date } = req.query;
+
+    if (!date) {
+      return res.status(400).json({ success: false, message: 'date query param is required' });
+    }
+
+    const tasks = await Task.find({ employeeId, date }).sort({ slotKey: 1 });
+    const attendance = await Attendance.findOne({ employeeId, date });
+    const employee = await Employee.findById(employeeId).select('fullName empCode department profileImage designation');
+
+    res.json({ success: true, tasks, attendance, employee });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ── Admin: Late Check-In Approvals ───────────────────────────────────────────
+
+/**
+ * GET /api/admin/attendance/late-approvals
+ * Returns all attendance records where checkInApprovalStatus is 'Pending'
+ * Optionally filtered by ?date=YYYY-MM-DD (defaults to today)
+ */
+export const getLateApprovals = async (req, res) => {
+  try {
+    const now = new Date();
+    const tzStr = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+    const localDate = new Date(tzStr);
+    const today = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, '0')}-${String(localDate.getDate()).padStart(2, '0')}`;
+
+    const date = req.query.date || today;
+    const statusFilter = req.query.status || 'Pending'; // 'Pending' | 'All'
+
+    const query = statusFilter === 'All'
+      ? { checkInApprovalStatus: { $in: ['Pending', 'Approved', 'Rejected'] } }
+      : { checkInApprovalStatus: 'Pending' };
+
+    if (date !== 'all') {
+      query.date = date;
+    }
+
+    const records = await Attendance.find(query)
+      .populate('employeeId', 'fullName empCode department profileImage designation')
+      .populate('approvedBy', 'fullName')
+      .populate('rejectedBy', 'fullName')
+      .sort({ approvalRequestedAt: -1 });
+
+    res.json({ success: true, records });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * PUT /api/admin/attendance/late-approvals/:id/approve
+ * Approves a pending late check-in request.
+ * Sets status='Late', checkInApprovalStatus='Approved', preserves original checkIn time.
+ */
+export const approveLateCheckIn = async (req, res) => {
+  try {
+    const { id } = req.params;
+    // adminId should come from auth middleware; fallback to body for compatibility
+    const adminId = req.admin?._id || req.body.adminId || null;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid attendance record ID' });
+    }
+
+    const record = await Attendance.findById(id);
+    if (!record) {
+      return res.status(404).json({ success: false, message: 'Attendance record not found' });
+    }
+
+    if (record.checkInApprovalStatus !== 'Pending') {
+      return res.status(400).json({ success: false, message: `Request is already ${record.checkInApprovalStatus.toLowerCase()}` });
+    }
+
+    // Preserve original checkIn time — only update status fields
+    if (record.status === 'Absent') {
+      record.status = 'Present';
+    }
+    record.isLate = true;
+    record.checkInApprovalStatus = 'Approved';
+    record.approvedBy = adminId;
+    record.approvedAt = new Date();
+
+    await record.save();
+
+    // Audit log
+    await AttendanceAuditLog.create({
+      employeeId: record.employeeId,
+      attendanceId: record._id,
+      attendanceDate: record.date,
+      oldStatus: 'Absent',
+      newStatus: 'Present',
+      updatedBy: adminId,
+      reason: 'Late check-in approved by admin'
+    });
+
+    const populated = await record.populate([
+      { path: 'employeeId', select: 'fullName empCode department profileImage designation' },
+      { path: 'approvedBy', select: 'fullName' }
+    ]);
+
+    res.json({ success: true, record: populated, message: 'Late check-in approved successfully' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * PUT /api/admin/attendance/late-approvals/:id/reject
+ * Rejects a pending late check-in request.
+ * Sets checkInApprovalStatus='Rejected', status remains 'Absent'.
+ */
+export const rejectLateCheckIn = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rejectionReason } = req.body;
+    const adminId = req.admin?._id || req.body.adminId || null;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid attendance record ID' });
+    }
+
+    const record = await Attendance.findById(id);
+    if (!record) {
+      return res.status(404).json({ success: false, message: 'Attendance record not found' });
+    }
+
+    if (record.checkInApprovalStatus !== 'Pending') {
+      return res.status(400).json({ success: false, message: `Request is already ${record.checkInApprovalStatus.toLowerCase()}` });
+    }
+
+    record.checkInApprovalStatus = 'Rejected';
+    record.rejectedBy = adminId;
+    record.rejectedAt = new Date();
+    record.rejectionReason = rejectionReason || '';
+    record.status = 'Absent'; // explicitly set to Absent
+
+    await record.save();
+
+    // Audit log
+    await AttendanceAuditLog.create({
+      employeeId: record.employeeId,
+      attendanceId: record._id,
+      attendanceDate: record.date,
+      oldStatus: 'Absent',
+      newStatus: 'Absent',
+      updatedBy: adminId,
+      reason: `Late check-in rejected: ${rejectionReason || 'No reason given'}`
+    });
+
+    const populated = await record.populate([
+      { path: 'employeeId', select: 'fullName empCode department profileImage designation' },
+      { path: 'rejectedBy', select: 'fullName' }
+    ]);
+
+    res.json({ success: true, record: populated, message: 'Late check-in rejected' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+

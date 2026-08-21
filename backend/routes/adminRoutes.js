@@ -7,15 +7,24 @@ import {
   getEmployeeHourlyReports, getPresentEmployees, getHalfDayEmployees, getLateEmployees,
   getAbsentEmployees, getActiveLeaveEmployees, getEmployeeNotes,
   exportAttendanceExcel, exportAttendancePdf, updateEmployeeCheckIn, updateEmployeeCheckOut,
-  getAllResignations, updateResignationStatus
+  updateAttendanceStatus, updateAttendanceRecord,
+  getAllResignations, updateResignationStatus, getEmployeeTasksByDate,
+  getLateApprovals, approveLateCheckIn, rejectLateCheckIn,
+  checkAdminEmail, updateAdmin, upgradeEmployee
 } from '../controllers/adminController.js';
+import { getAdminTimesheets, getTimesheetById } from '../controllers/timesheetController.js';
 import { upload } from '../cloudinary.js';
+import {
+  getEmployeeLeaveBalance, processMonthlyAccrual, backfillAccruals,
+  adminLeaveAdjustment, getAccrualOverview
+} from '../controllers/leaveAccrualController.js';
 
 const router = express.Router();
 
 router.get('/employees', getEmployees);
 router.get('/employees/ex', getExEmployees);
 router.post('/employees', createEmployee);
+router.post('/employees/:id/upgrade', upgradeEmployee);
 router.put('/employees/:id', updateEmployee);
 router.delete('/employees/:id', deleteEmployee);
 router.get('/logs', getLogs);
@@ -28,13 +37,30 @@ router.get('/attendance/late', getLateEmployees);
 router.get('/attendance/absent', getAbsentEmployees);
 router.put('/attendance/checkin', updateEmployeeCheckIn);
 router.put('/attendance/checkout', updateEmployeeCheckOut);
+router.put('/attendance/status', updateAttendanceStatus);
+router.patch('/attendance/:id', updateAttendanceRecord);
+
+// Late Check-In Approval Routes
+router.get('/attendance/late-approvals', getLateApprovals);
+router.put('/attendance/late-approvals/:id/approve', approveLateCheckIn);
+router.put('/attendance/late-approvals/:id/reject', rejectLateCheckIn);
 router.get('/leaves/active', getActiveLeaveEmployees);
 router.get('/leaves', getLeaves);
 router.patch('/leaves/:id', updateLeaveStatus);
+
+// ── Earned Leave Accrual Routes ─────────────────────────────────────────────
+router.get('/leaves/accrual/overview', getAccrualOverview);
+router.get('/leaves/accrual/balance/:employeeId', getEmployeeLeaveBalance);
+router.post('/leaves/accrual/process', processMonthlyAccrual);
+router.post('/leaves/accrual/backfill', backfillAccruals);
+router.post('/leaves/adjustment', adminLeaveAdjustment);
+// ──────────────────────────────────────────────────────────────────────
 router.post('/notifications', createNotification);
 router.post('/settings', updateSettings);
+router.get('/admins/check-email', checkAdminEmail);
 router.get('/admins', getAdmins);
 router.post('/admins', createAdmin);
+router.put('/admins/:id', updateAdmin);
 router.delete('/admins/:id', deleteAdmin);
 router.get('/reports/hourly', getHourlyReports);
 router.get('/reports/hourly/:id', getEmployeeHourlyReports);
@@ -57,5 +83,12 @@ router.get('/notes/:employeeId', getEmployeeNotes);
 // Resignations
 router.get('/resignations', getAllResignations);
 router.patch('/resignations/:id', updateResignationStatus);
+
+// Employee Timesheet Task Viewer
+router.get('/tasks/:employeeId', getEmployeeTasksByDate);
+
+// Timesheet Routes for Admin
+router.get('/timesheets', getAdminTimesheets);
+router.get('/timesheets/:id', getTimesheetById);
 
 export default router;
