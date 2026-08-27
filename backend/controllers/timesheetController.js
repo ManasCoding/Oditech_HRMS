@@ -155,7 +155,37 @@ export const getEmployeeTimesheets = async (req, res) => {
 
 export const getAdminTimesheets = async (req, res) => {
   try {
-    const timesheets = await Timesheet.find().sort({ submissionTime: -1, date: -1 });
+    const { date, department, search, status } = req.query;
+
+    // Build query — never return 'Pending' timesheets (employee hasn't submitted)
+    const query = { status: { $in: ['Submitted', 'Completed'] } };
+
+    // If admin explicitly requests a specific status
+    if (status && status !== 'All Status') {
+      query.status = status;
+    }
+
+    // Date filter
+    if (date) query.date = date;
+
+    // Department filter
+    if (department && department !== 'All Departments') {
+      query.department = department;
+    }
+
+    let timesheets = await Timesheet.find(query)
+      .populate('employeeId', 'fullName empCode department profileImage')
+      .sort({ submissionTime: -1, date: -1 });
+
+    // Search filter (by employee name or empCode)
+    if (search) {
+      const lower = search.toLowerCase();
+      timesheets = timesheets.filter(t =>
+        t.employeeName?.toLowerCase().includes(lower) ||
+        t.employeeId?.empCode?.toLowerCase().includes(lower)
+      );
+    }
+
     res.status(200).json({ success: true, timesheets });
   } catch (error) {
     console.error('Error fetching admin timesheets:', error);

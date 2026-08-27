@@ -9,7 +9,9 @@ import SystemSetting from '../models/SystemSetting.js';
 import Resignation from '../models/Resignation.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import LeaveTransaction from '../models/LeaveTransaction.js';
+import Holiday from '../models/Holiday.js';
 import { getLeaveBalance } from './leaveAccrualController.js';
+import { calculateAttendanceStatus, ATTENDANCE_CONFIG } from '../utils/attendanceCalculator.js';
 
 // Helper for distance calculation
 const getDistance = (lat1, lon1, lat2, lon2) => {
@@ -96,6 +98,26 @@ export const getDirectory = async (req, res) => {
   }
 };
 
+const applyDisplayStatus = (attendance) => {
+  if (!attendance) return attendance;
+  const doc = attendance.toObject ? attendance.toObject() : { ...attendance };
+  
+  const calc = calculateAttendanceStatus(doc);
+  doc.status = calc.status;
+  doc.workHours = calc.workHours;
+  doc.overtime = calc.overtime;
+  doc.liveStateText = calc.liveStateText;
+  doc.workingSeconds = calc.workingSeconds;
+  doc.overtimeSeconds = calc.overtimeSeconds;
+  doc.isOnLunchBreak = calc.isOnLunchBreak;
+  doc.isShiftCompleted = calc.isShiftCompleted;
+  doc.isLate = calc.isLate;
+  doc.lateMinutes = calc.lateMinutes;
+  
+  return doc;
+};
+
+
 export const checkIn = async (req, res) => {
   const { employeeId, lat, lng } = req.body;
   const now = new Date();
@@ -147,27 +169,25 @@ export const checkIn = async (req, res) => {
       let isLate = false;
       let checkInApprovalStatus = 'Not Required';
       let approvalRequestedAt = null;
+      let exceptionType = 'None';
+      let originalStatus = null;
 
       if (currentTimeStr >= HALF_DAY_THRESHOLD) {
-        // After 1:30 PM — Half Day, requires approval too
+        // At or after 1:30 PM — treat as Half Day pending approval
+        isLate = true;
+        checkInApprovalStatus = 'Pending';
+        approvalRequestedAt = now;
+        exceptionType = 'Half Day';
         status = 'Half Day';
+      } else if (currentTimeStr >= LATE_THRESHOLD) {
+        // At or after 9:30 AM — Late, requires approval
         isLate = true;
         checkInApprovalStatus = 'Pending';
         approvalRequestedAt = now;
-      } else if (currentTimeStr > '09:35') {
-        // After 9:35 AM — Mark automatic as Late, and show for approval
-        isLate = true;
-        checkInApprovalStatus = 'Pending';
-        approvalRequestedAt = now;
+        exceptionType = 'Late';
         status = 'Late';
-      } else if (currentTimeStr > LATE_THRESHOLD) {
-        // Between 9:30 AM and 9:35 AM — Grace period, mark as Present but flag as late, requires approval
-        isLate = true;
-        checkInApprovalStatus = 'Pending';
-        approvalRequestedAt = now;
-        status = 'Present';
       }
-      // else: on time — Present, no approval needed
+      // else: before 9:30 AM — on time, no approval needed
 
       attendance = await Attendance.create({
         employeeId,
@@ -178,11 +198,13 @@ export const checkIn = async (req, res) => {
         isLate,
         lateMinutes,
         checkInApprovalStatus,
-        approvalRequestedAt
+        approvalRequestedAt,
+        exceptionType,
+        originalStatus
       });
 
       const lateApprovalPending = checkInApprovalStatus === 'Pending';
-      return res.json({ success: true, attendance, alreadyCheckedIn: false, lateApprovalPending });
+      return res.json({ success: true, attendance: applyDisplayStatus(attendance), alreadyCheckedIn: false, lateApprovalPending });
     }
     
     // Already checked in. If they re-enter geofence, clear the lastExitTime.
@@ -195,7 +217,7 @@ export const checkIn = async (req, res) => {
     // Return the existing record so the frontend can show the rejection UI
     const lateApprovalPending = attendance.checkInApprovalStatus === 'Pending';
     
-    return res.json({ success: true, attendance, alreadyCheckedIn: true, lateApprovalPending });
+    return res.json({ success: true, attendance: applyDisplayStatus(attendance), alreadyCheckedIn: true, lateApprovalPending });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -213,42 +235,48 @@ export const checkOut = async (req, res) => {
   const month = String(localDate.getMonth() + 1).padStart(2, '0');
   const day = String(localDate.getDate()).padStart(2, '0');
   const today = `${year}-${month}-${day}`;
-  
+
   try {
     let attendance = await Attendance.findOne({ employeeId, date: today });
     if (!attendance) {
       return res.status(404).json({ success: false, message: 'No check-in record found for today.' });
     }
-    
-    // Calculate work hours
+
     const checkOutTime = now;
     if (attendance.checkIn) {
-      const diffMs = checkOutTime - new Date(attendance.checkIn);
-      const mins = Math.floor(diffMs / (1000 * 60));
-      const totalHours = Math.floor(mins / 60);
-      const workHours = `${totalHours}h ${mins % 60}m`;
-
       attendance.checkOut = checkOutTime;
-      attendance.workHours = workHours;
       attendance.workStatus = 'Completed';
       attendance.lastExitTime = null;
 
-      // Mark as Half Day ONLY if worked less than 4 hours
-      // Do NOT use checkout time as a Half Day trigger — that was causing fake Half Day marks
-      // Preserve 'Late' status if the person was late but worked full hours (>= 4h)
-      if (totalHours < 4 && attendance.status !== 'Absent') {
-        attendance.status = 'Half Day';
+      const calc = calculateAttendanceStatus(attendance, { currentTime: checkOutTime });
+      attendance.status = calc.status;
+      attendance.workHours = calc.workHours;
+      attendance.overtime = calc.overtime;
+      attendance.totalWorkingSeconds = calc.workingSeconds;
+      attendance.totalOvertimeSeconds = calc.overtimeSeconds;
+
+      const fullDayThresholdSec = (ATTENDANCE_CONFIG.FULL_DAY_THRESHOLD_MINUTES || 495) * 60;
+      if (calc.workingSeconds < fullDayThresholdSec) {
+        if (attendance.checkInApprovalStatus === 'Not Required') {
+          attendance.status = calc.status;
+          attendance.exceptionType = calc.status === 'Absent' ? 'Absent' : 'Half Day';
+          attendance.checkInApprovalStatus = 'Pending';
+          attendance.approvalRequestedAt = now;
+        } else if (attendance.checkInApprovalStatus === 'Pending' && attendance.exceptionType === 'Late') {
+          attendance.exceptionType = calc.status === 'Absent' ? 'Absent' : 'Half Day';
+          attendance.status = calc.status;
+        }
       }
-      // else: keep existing status (Present / Late) unchanged
 
       await attendance.save();
     }
 
-    return res.json({ success: true, attendance, message: 'Checked out successfully.' });
+    return res.json({ success: true, attendance: applyDisplayStatus(attendance), message: 'Checked out successfully.' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 
 export const markGeofenceExit = async (req, res) => {
   const { employeeId } = req.body;
@@ -287,12 +315,15 @@ export const getTodayAttendance = async (req, res) => {
     const tzStr = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
     const localDate = new Date(tzStr);
     const today = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, '0')}-${String(localDate.getDate()).padStart(2, '0')}`;
-    const attendance = await Attendance.findOne({ employeeId: req.params.employeeId, date: today });
-    res.json({ success: true, attendance });
+    let attendance = await Attendance.findOne({ employeeId: req.params.employeeId, date: today });
+
+
+    res.json({ success: true, attendance: applyDisplayStatus(attendance) });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 
 export const getStats = async (req, res) => {
   try {
@@ -312,18 +343,28 @@ export const getStats = async (req, res) => {
     const settingsMap = settings.reduce((acc, s) => ({ ...acc, [s.key]: parseFloat(s.value) }), {});
     const totalLeaveQuota = (settingsMap.casual_leave || 12) + (settingsMap.sick_leave || 10);
 
-    // Present days — includes Late (Late = present but arrived after threshold)
-    const presentDays = await Attendance.countDocuments({
+    // Fetch all records for the period to calculate stats accurately with display statuses
+    const periodRecords = await Attendance.find({
       employeeId,
-      date: { $regex: dateRegex },
-      status: { $in: ['Present', 'Late'] }
+      date: { $regex: dateRegex }
     });
 
-    // Half days in period
-    const halfDays = await Attendance.countDocuments({
-      employeeId,
-      date: { $regex: dateRegex },
-      status: 'Half Day'
+    let presentDays = 0;
+    let halfDays = 0;
+    let lateDays = 0; // count from applyDisplayStatus loop
+
+    periodRecords.forEach(record => {
+      const displayDoc = applyDisplayStatus(record);
+      if (displayDoc.status === 'Present' || displayDoc.status === 'Late') {
+        presentDays++;
+      }
+      if (displayDoc.status === 'Late' || displayDoc.isLate) {
+        lateDays++;
+      }
+      if (displayDoc.status === 'Half Day') {
+        halfDays++;
+      }
+      // absentDays is calculated later by subtracting from workingDays
     });
 
     // Working days in the period (Mon-Sat count, exclude Sundays)
@@ -336,6 +377,16 @@ export const getStats = async (req, res) => {
       const day = d.getDay();
       if (day !== 0) workingDays++; // exclude Sundays (0), keep Monday-Saturday
       d.setDate(d.getDate() + 1);
+    }
+
+    // Week Offs (Sundays count in full target month/year)
+    const monthStart = isYearly ? new Date(`${targetYear}-01-01`) : new Date(`${targetYear}-${targetMonth}-01`);
+    const monthEnd = isYearly ? new Date(`${targetYear}-12-31`) : new Date(targetYear, parseInt(targetMonth), 0);
+    let weekOffs = 0;
+    const tempD = new Date(monthStart);
+    while (tempD <= monthEnd) {
+      if (tempD.getDay() === 0) weekOffs++;
+      tempD.setDate(tempD.getDate() + 1);
     }
 
     // Leaves taken in period (approved leaves overlapping period)
@@ -383,6 +434,13 @@ export const getStats = async (req, res) => {
     // Absent = working days - present - half days - leaves taken
     const absentDays = Math.max(0, workingDays - presentDays - halfDays - leavesTaken);
 
+    // Fetch total holidays for the target period
+    const holidaysQuery = isYearly 
+      ? { holidayDate: { $regex: `^${targetYear}-` }, isHoliday: true }
+      : { holidayDate: { $regex: dateRegex }, isHoliday: true };
+    const holidaysInPeriod = await Holiday.find(holidaysQuery);
+    const holidayCount = holidaysInPeriod.length;
+
     // Available leaves = quota - total approved leave days this year
     const yearStart = `${targetYear}-01-01`;
     const yearEnd = `${targetYear}-12-31`;
@@ -400,12 +458,6 @@ export const getStats = async (req, res) => {
     const totalApprovedDaysThisYear = approvedThisYearResult.length > 0 ? approvedThisYearResult[0].totalDays : 0;
     const availableLeaves = Math.max(0, totalLeaveQuota - totalApprovedDaysThisYear);
 
-    const lateCount = await Attendance.countDocuments({
-      employeeId,
-      date: { $regex: dateRegex },
-      $or: [{ status: 'Late' }, { isLate: true }]
-    });
-
     res.json({
       success: true,
       stats: {
@@ -413,12 +465,15 @@ export const getStats = async (req, res) => {
         presentDays,
         absentDays,
         halfDays,
+        weekOffs,
         leavesTaken,
+        holidayCount,
+        holidays: holidaysInPeriod,
         availableLeaves,
         pendingLeaves,
         rejectedLeaves,
         attendanceRate: workingDays > 0 ? parseFloat(((presentDays + halfDays * 0.5) / workingDays * 100).toFixed(2)) : 0,
-        lateCount,
+        lateCount: lateDays,
       }
     });
   } catch (error) {
@@ -429,10 +484,24 @@ export const getStats = async (req, res) => {
 export const getLateCount = async (req, res) => {
   try {
     const { employeeId } = req.params;
-    const count = await Attendance.countDocuments({
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const dateRegex = `^${year}-${month}`;
+
+    const records = await Attendance.find({
       employeeId,
-      status: 'Late'
+      date: { $regex: dateRegex }
     });
+
+    let count = 0;
+    records.forEach(r => {
+      const doc = applyDisplayStatus(r);
+      if (doc.status === 'Late' || doc.isLate) {
+        count++;
+      }
+    });
+
     res.json({ success: true, count });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -522,7 +591,8 @@ export const getAttendanceLog = async (req, res) => {
       date: { $regex: dateRegex }
     }).sort({ date: -1 });
 
-    res.json({ success: true, records });
+    const transformedRecords = records.map(applyDisplayStatus);
+    res.json({ success: true, records: transformedRecords });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

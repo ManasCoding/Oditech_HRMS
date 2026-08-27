@@ -10,6 +10,7 @@ import SystemSetting from './models/SystemSetting.js';
 import Attendance from './models/Attendance.js';
 import { initSocket } from './socket.js';
 import { initCronJobs } from './utils/cronJobs.js';
+import { calculateAttendanceStatus } from './utils/attendanceCalculator.js';
 
 // Route Imports
 import authRoutes from './routes/authRoutes.js';
@@ -110,9 +111,12 @@ const seedData = async () => {
   }
 };
 
+import { sanitizeAllAttendanceRecords } from './scripts/sanitizeAttendance.js';
+
 connectDB().then(() => {
   seedData();
   initCronJobs();
+  sanitizeAllAttendanceRecords();
 });
 
 app.get("/", (req, res) => {
@@ -143,47 +147,8 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
 
-// Auto Check-out background job (runs every 5 minutes)
-const checkAutoCheckout = async () => {
-  try {
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
 
-    // Find all attendance records with a lastExitTime older than 1 hour and no checkOut
-    const attendances = await Attendance.find({
-      checkOut: { $exists: false },
-      lastExitTime: { $lt: oneHourAgo, $ne: null }
-    });
 
-    for (let att of attendances) {
-      if (!att.checkOut && att.lastExitTime) {
-        const checkOutTime = att.lastExitTime;
-        let workHours = att.workHours;
-        let mins = 0;
-        if (att.checkIn) {
-          const diffMs = checkOutTime - new Date(att.checkIn);
-          mins = Math.floor(diffMs / (1000 * 60));
-          workHours = `${Math.floor(mins / 60)}h ${mins % 60}m`;
-        }
-        
-        att.checkOut = checkOutTime;
-        att.workHours = workHours;
-        att.workStatus = 'Completed';
-
-        // Automatically mark as Half Day if worked less than 4 hours
-        if (mins > 0 && Math.floor(mins / 60) < 4 && att.status !== 'Absent') {
-          att.status = 'Half Day';
-        }
-
-        await att.save();
-        console.log(`Auto-checked out employee ${att.employeeId} at ${checkOutTime} (${workHours})`);
-      }
-    }
-  } catch (error) {
-    console.error('Error running auto checkout job:', error.message);
-  }
-};
-
-setInterval(checkAutoCheckout, 5 * 60 * 1000);
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {

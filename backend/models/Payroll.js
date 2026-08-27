@@ -65,6 +65,7 @@ const PayrollSchema = new mongoose.Schema({
   tds: { type: Number, default: 0 },
   advance: { type: Number, default: 0 },
   loan: { type: Number, default: 0 },
+  penalty: { type: Number, default: 0 },
   absentDeduction: { type: Number, default: 0 },
   unpaidLeaveDeduction: { type: Number, default: 0 },
   lateFine: { type: Number, default: 0 },

@@ -8,7 +8,7 @@ import {
   getAbsentEmployees, getActiveLeaveEmployees, getEmployeeNotes,
   exportAttendanceExcel, exportAttendancePdf, updateEmployeeCheckIn, updateEmployeeCheckOut,
   updateAttendanceStatus, updateAttendanceRecord,
-  getAllResignations, updateResignationStatus, getEmployeeTasksByDate,
+  getAllResignations, updateResignationStatus, getResignationById, updateResignationChecklist, getEmployeeTasksByDate,
   getLateApprovals, approveLateCheckIn, rejectLateCheckIn,
   checkAdminEmail, updateAdmin, upgradeEmployee
 } from '../controllers/adminController.js';
@@ -82,7 +82,9 @@ router.get('/notes/:employeeId', getEmployeeNotes);
 
 // Resignations
 router.get('/resignations', getAllResignations);
+router.get('/resignations/:id', getResignationById);
 router.patch('/resignations/:id', updateResignationStatus);
+router.patch('/resignations/:id/checklist', updateResignationChecklist);
 
 // Employee Timesheet Task Viewer
 router.get('/tasks/:employeeId', getEmployeeTasksByDate);

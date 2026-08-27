@@ -1,0 +1,220 @@
+﻿        {/* ── Attendance Approval Requests Section ──────────────────────────── */}
+        <div className="bg-white rounded-lg border border-slate-100 shadow-sm overflow-hidden mb-8">
+          
+          {/* Top Tab Bar */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-slate-100 px-6 pt-4 gap-4">
+            <div className="flex items-center gap-8">
+              {['Pending', 'Approved', 'Rejected'].map(tab => (
+                <button
+                  key={tab}
+                  onClick={() => setApprovalTab(tab)}
+                  className={`pb-4 text-sm font-bold transition-all relative ${
+                    approvalTab === tab 
+                      ? 'text-blue-600' 
+                      : 'text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  {tab} ({allApprovals[tab]?.length || 0})
+                  {approvalTab === tab && (
+                    <div className="absolute bottom-0 left-0 w-full h-0.5 bg-blue-600" />
+                  )}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-3 pb-4">
+              <div className="relative">
+                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input 
+                  type="text" 
+                  placeholder="Search employee..." 
+                  value={approvalSearch}
+                  onChange={(e) => setApprovalSearch(e.target.value)}
+                  className="pl-9 pr-4 py-2 border border-slate-200 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-100 w-full md:w-64"
+                />
+              </div>
+              <button className="flex items-center gap-2 px-4 py-2 border border-slate-200 rounded-md text-sm font-bold text-slate-600 hover:bg-slate-50">
+                <Filter size={16} /> Filter
+              </button>
+              <button className="flex items-center justify-center w-9 h-9 border border-slate-200 rounded-md text-slate-600 hover:bg-slate-50">
+                <Download size={16} />
+              </button>
+            </div>
+          </div>
+
+          {/* Info Banner */}
+          <div className="p-6 pb-2">
+            <div className="bg-[#f8faff] border border-blue-100/50 rounded-lg p-3 flex items-center gap-2">
+              <Info size={16} className="text-blue-600 shrink-0" />
+              <p className="text-sm text-[#475569]">
+                Showing all {approvalTab.toLowerCase()} attendance requests. {approvalTab === 'Pending' && 'These requests will remain until you approve or reject them.'}
+              </p>
+            </div>
+          </div>
+
+          {/* Table Area */}
+          <div className="p-6 overflow-x-auto">
+            {lateApprovalsLoading ? (
+              <div className="py-10 text-center text-slate-400 font-bold">Loading...</div>
+            ) : lateApprovals.filter(r => 
+              approvalSearch === '' || 
+              (r.employeeId?.fullName || '').toLowerCase().includes(approvalSearch.toLowerCase()) ||
+              (r.employeeId?.empCode || '').toLowerCase().includes(approvalSearch.toLowerCase())
+            ).length === 0 ? (
+              <div className="py-10 text-center">
+                <CheckCircle2 size={40} className="text-slate-300 mx-auto mb-3" />
+                <p className="text-slate-400 font-bold text-sm">No {approvalTab.toLowerCase()} requests found.</p>
+              </div>
+            ) : (
+              <div className="min-w-[1000px]">
+                {/* Header */}
+                <div className="grid grid-cols-[2fr_1.5fr_1fr_1fr_1fr_1fr_1.5fr] gap-4 mb-4 px-4 pb-4 border-b border-slate-100">
+                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">EMPLOYEE</div>
+                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">DATE <ChevronDown size={12}/></div>
+                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">CHECK-IN</div>
+                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">LATE BY</div>
+                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">REQUESTED</div>
+                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">STATUS</div>
+                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">ACTION</div>
+                </div>
+
+                {/* Group By Date */}
+                <div className="flex flex-col">
+                  {(() => {
+                    const filteredRecords = lateApprovals.filter(r => 
+                      approvalSearch === '' || 
+                      (r.employeeId?.fullName || '').toLowerCase().includes(approvalSearch.toLowerCase()) ||
+                      (r.employeeId?.empCode || '').toLowerCase().includes(approvalSearch.toLowerCase())
+                    );
+                    
+                    // Sort older first
+                    const sortedRecords = [...filteredRecords].sort((a, b) => new Date(a.date) - new Date(b.date));
+                    
+                    const grouped = {};
+                    sortedRecords.forEach(r => {
+                      if (!grouped[r.date]) grouped[r.date] = [];
+                      grouped[r.date].push(r);
+                    });
+
+                    const todayStr = new Date().toISOString().split('T')[0];
+
+                    return Object.entries(grouped).map(([dateStr, records], idx) => {
+                      const dateObj = new Date(dateStr);
+                      const isToday = dateStr === todayStr;
+                      
+                      const dateFormatted = dateObj.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+                      const dayName = dateObj.toLocaleDateString('en-GB', { weekday: 'long' });
+
+                      return (
+                        <React.Fragment key={dateStr}>
+                          {isToday && (
+                            <div className="bg-[#f8faff] py-2 px-4 mb-2 mt-2">
+                              <span className="text-xs font-bold text-blue-600 uppercase tracking-wider">
+                                TODAY — {dateFormatted.toUpperCase()} ( {records.length} REQUEST{records.length !== 1 ? 'S' : ''} )
+                              </span>
+                            </div>
+                          )}
+
+                          {records.map((record, rIdx) => {
+                            const emp = record.employeeId;
+                            const checkInTime = record.checkIn ? new Date(record.checkIn).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true }).toLowerCase() : '—';
+                            const requestedAt = record.approvalRequestedAt ? new Date(record.approvalRequestedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true }).toLowerCase() : '—';
+                            const lateMinutes = record.lateMinutes || 0;
+                            const isProcessing = approvalProcessing === record._id;
+                            
+                            return (
+                              <div key={record._id} className={`grid grid-cols-[2fr_1.5fr_1fr_1fr_1fr_1fr_1.5fr] gap-4 items-center py-4 px-4 ${rIdx !== records.length - 1 || !isToday && idx !== Object.keys(grouped).length - 1 ? 'border-b border-slate-100' : ''} hover:bg-slate-50/50 transition-colors`}>
+                                
+                                {/* EMPLOYEE */}
+                                <div className="flex items-center gap-3 min-w-0">
+                                  <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center overflow-hidden shrink-0">
+                                    {emp?.profileImage ? (
+                                      <img src={emp.profileImage} className="w-full h-full object-cover" alt={emp?.fullName} onError={(e) => { e.target.onerror = null; e.target.style.display = 'none'; }} />
+                                    ) : (
+                                      <span className="text-sm font-bold text-slate-500">{emp?.fullName?.charAt(0)}</span>
+                                    )}
+                                  </div>
+                                  <div className="min-w-0">
+                                    <h4 className="font-bold text-[#1e293b] text-[13px] truncate">{emp?.fullName}</h4>
+                                    <p className="text-[11px] font-medium text-slate-400 uppercase tracking-widest truncate mt-0.5">{emp?.empCode} · {emp?.department}</p>
+                                  </div>
+                                </div>
+
+                                {/* DATE */}
+                                <div>
+                                  <div className="flex items-center gap-1.5 text-[13px] font-medium text-[#1e293b]">
+                                    <Calendar size={14} className="text-slate-400" /> {dateFormatted}
+                                  </div>
+                                  <p className="text-[11px] font-medium text-slate-400 ml-5 mt-0.5">{dayName}</p>
+                                </div>
+
+                                {/* CHECK-IN */}
+                                <div className="text-[13px] font-bold text-[#1e293b]">
+                                  {checkInTime}
+                                </div>
+
+                                {/* LATE BY */}
+                                <div className="text-[13px] font-bold text-[#f97316]">
+                                  {lateMinutes > 0 ? `${lateMinutes} min` : '—'}
+                                </div>
+
+                                {/* REQUESTED */}
+                                <div className="text-[13px] font-bold text-[#1e293b]">
+                                  {requestedAt}
+                                </div>
+
+                                {/* STATUS */}
+                                <div>
+                                  {record.checkInApprovalStatus === 'Pending' && (
+                                    <span className="px-3 py-1 bg-[#fef3c7] text-[#d97706] text-[10px] font-bold uppercase tracking-wider rounded-md">
+                                      PENDING
+                                    </span>
+                                  )}
+                                  {record.checkInApprovalStatus === 'Approved' && (
+                                    <span className="px-3 py-1 bg-[#dcfce7] text-[#16a34a] text-[10px] font-bold uppercase tracking-wider rounded-md">
+                                      APPROVED
+                                    </span>
+                                  )}
+                                  {record.checkInApprovalStatus === 'Rejected' && (
+                                    <span className="px-3 py-1 bg-[#fee2e2] text-[#dc2626] text-[10px] font-bold uppercase tracking-wider rounded-md">
+                                      REJECTED
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* ACTION */}
+                                <div className="flex items-center gap-2">
+                                  {record.checkInApprovalStatus === 'Pending' ? (
+                                    <>
+                                      <button
+                                        onClick={() => handleApprove(record._id)}
+                                        disabled={isProcessing}
+                                        className="flex items-center justify-center gap-1.5 px-3 py-1.5 bg-[#10b981] text-white rounded-md text-[11px] font-medium hover:bg-[#059669] transition-all disabled:opacity-50 min-w-[85px]"
+                                      >
+                                        <CheckCircle2 size={13} /> Approve
+                                      </button>
+                                      <button
+                                        onClick={() => { setRejectModal({ id: record._id, employeeName: emp?.fullName }); setRejectReason(''); }}
+                                        disabled={isProcessing}
+                                        className="flex items-center justify-center gap-1.5 px-3 py-1.5 bg-[#f43f5e] text-white rounded-md text-[11px] font-medium hover:bg-[#e11d48] transition-all disabled:opacity-50 min-w-[85px]"
+                                      >
+                                        <XCircle size={13} /> Reject
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <span className="text-xs font-medium text-slate-400">—</span>
+                                  )}
+                                </div>
+
+                              </div>
+                            );
+                          })}
+                        </React.Fragment>
+                      );
+                    });
+                  })()}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+        {/* ── End Attendance Approval Requests ───────────────────────────────── */}

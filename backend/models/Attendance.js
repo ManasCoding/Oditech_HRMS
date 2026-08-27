@@ -11,11 +11,27 @@ const AttendanceSchema = new mongoose.Schema({
   status: { type: String, enum: ['Present', 'Absent', 'Half Day', 'Late', 'Paid Leave', 'Unpaid Leave', 'Holiday', 'Weekend', 'Site Visit'], default: 'Present' },
   isLate: { type: Boolean, default: false }, // true if employee checked in after 9:30 AM threshold
   lateMinutes: { type: Number, default: 0 }, // minutes late from 9:30 AM
-  // ── Late Check-In Approval ───────────────────────────────────────────────────
+  autoCheckedOut: { type: Boolean, default: false },
+  autoCheckoutReason: { type: String, default: '' },
+  totalWorkingSeconds: { type: Number, default: 0 },
+  totalOvertimeSeconds: { type: Number, default: 0 },
+  // ── Late / Half-Day Approval ─────────────────────────────────────────────────
   checkInApprovalStatus: {
     type: String,
     enum: ['Not Required', 'Pending', 'Approved', 'Rejected'],
     default: 'Not Required'
+  },
+  // Tracks what kind of exception is pending (Late or Half Day)
+  exceptionType: {
+    type: String,
+    enum: ['None', 'Late', 'Half Day'],
+    default: 'None'
+  },
+  // The status that should be restored after approval (Late or Half Day)
+  originalStatus: {
+    type: String,
+    enum: ['Present', 'Late', 'Half Day', 'Absent', null],
+    default: null
   },
   approvalRequestedAt: { type: Date },
   approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },

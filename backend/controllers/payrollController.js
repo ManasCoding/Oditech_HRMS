@@ -225,36 +225,36 @@ const calcAttendanceSummary = async (employeeId, monthNum, yearNum) => {
   const effectiveHolidays   = nonSundayHolidays > 0 ? nonSundayHolidays : attendanceHolidays;
   const effectiveWeeklyOffs = weeklyOffs + attendanceWeekends;
 
-  // Working days: total calendar minus Sundays minus holidays (from whichever source has data)
-  totalWorkingDays = totalCalDays - weeklyOffs - (nonSundayHolidays > 0 ? nonSundayHolidays : attendanceHolidays);
+  // Working days: total calendar minus Sundays (Holidays are paid, so they are part of working days for salary division)
+  totalWorkingDays = totalCalDays - weeklyOffs;
 
   // ── 9. Absent = working days not covered by any positive status ───────────────
   // Only count days up to today — don't mark future unrecorded days as absent
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  // Count past working days (excluding weekends and holidays) up to today
+  // Count past working days (excluding weekends, but INCLUDING holidays since they are paid days) up to today
   let pastWorkingDays = 0;
   const cur2 = new Date(periodStart + 'T00:00:00');
   const periodEndDate = new Date(periodEnd + 'T00:00:00');
   const effectiveEnd = today < periodEndDate ? today : periodEndDate;
   while (cur2 <= effectiveEnd) {
-    const dateStr2 = `${cur2.getFullYear()}-${String(cur2.getMonth() + 1).padStart(2, '0')}-${String(cur2.getDate()).padStart(2, '0')}`;
     const isSun2 = cur2.getDay() === 0;
-    const isHol2 = holidayDateSet.has(dateStr2);
-    if (!isSun2 && !isHol2) pastWorkingDays++;
+    if (!isSun2) pastWorkingDays++;
     cur2.setDate(cur2.getDate() + 1);
   }
 
   // Explicitly-absent records + truly unmarked past days
-  const accounted   = present + halfDay + paidLeave + unpaidLeave + attendanceHolidays + absentFromAtt;
+  const accounted   = present + halfDay + paidLeave + unpaidLeave + effectiveHolidays + absentFromAtt;
   const unmarked    = Math.max(0, pastWorkingDays - accounted);
   const totalAbsent = absentFromAtt + unmarked;
 
+
   // ── 10. Payable days ──────────────────────────────────────────────────────────
-  // present + paidLeave + holidays + weeklyOff + halfDay×0.5, capped at totalCalDays
-  const rawPayable  = present + paidLeave + effectiveHolidays + effectiveWeeklyOffs + (halfDay * 0.5);
-  const payableDays = Math.min(Math.round(rawPayable * 10) / 10, totalCalDays);
+  // present + paidLeave + holidays + halfDay×0.5, capped at totalCalDays minus effectiveWeeklyOffs
+  const rawPayable  = present + paidLeave + effectiveHolidays + (halfDay * 0.5);
+  const maxPayable = Math.max(0, totalCalDays - effectiveWeeklyOffs);
+  const payableDays = Math.min(Math.round(rawPayable * 10) / 10, maxPayable);
 
   return {
     payrollPeriod: { from: periodStart, to: periodEnd },
@@ -429,7 +429,7 @@ export const generatePayroll = async (req, res) => {
       specialAllowance = 0, bonus = 0, overtime = 0, otherEarnings = 0,
       // Deductions
       professionalTax = 0, pf = 0, esi = 0, tds = 0,
-      advance = 0, loan = 0, lateFine = 0, otherDeductions = 0,
+      advance = 0, loan = 0, penalty = 0, lateFine = 0, otherDeductions = 0,
       adminId,
     } = req.body;
 
@@ -478,7 +478,7 @@ export const generatePayroll = async (req, res) => {
     const attendanceDeds = absentDeduction + unpaidLeaveDeduction + halfDayDeduction;
     const extraDeds      =
       Number(professionalTax) + Number(pf) + Number(esi) + Number(tds) +
-      Number(advance) + Number(loan) + Number(lateFine) + Number(otherDeductions);
+      Number(advance) + Number(loan) + Number(penalty) + Number(lateFine) + Number(otherDeductions);
     const totalDeductions = attendanceDeds + extraDeds;
     const netSalary       = Math.max(0, grossSalary - totalDeductions);
     const amountInWords   = toWords(Math.round(netSalary));
@@ -522,7 +522,7 @@ export const generatePayroll = async (req, res) => {
       presentSalary, halfDaySalary, paidLeaveSalary,
       totalEarnings: grossSalary,
       // Deductions
-      professionalTax, pf, esi, tds, advance, loan,
+      professionalTax, pf, esi, tds, advance, loan, penalty,
       absentDeduction, unpaidLeaveDeduction, lateFine, otherDeductions,
       totalDeductions,
       // Totals
