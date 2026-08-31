@@ -13,4 +13,10 @@ const transporter = nodemailer.createTransport({
   tls: { rejectUnauthorized: false }
 });
 
+// Force IPv4 if using Node 18+ to prevent ENETUNREACH on IPv6 addresses
+import dns from 'dns';
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
+
 export default transporter;
