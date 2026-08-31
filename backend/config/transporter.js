@@ -1,23 +1,34 @@
-import nodemailer from 'nodemailer';
+import dns from "node:dns";
+import nodemailer from "nodemailer";
 import dotenv from 'dotenv';
+
 dotenv.config();
-const smtpPort = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT) : 465;
+
+// Prefer IPv4 globally
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder("ipv4first");
+}
+
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: smtpPort,
-  secure: smtpPort === 465, // true for 465, false for 587
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
+
+  // IMPORTANT:
+  // Force DNS resolution to IPv4
+  family: 4,
+
   auth: {
     user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
+    pass: process.env.SMTP_PASS,
   },
-  tls: { rejectUnauthorized: false },
-  family: 4 // Force IPv4 explicitly at the socket level
-});
 
-// Force IPv4 if using Node 18+ to prevent ENETUNREACH on IPv6 addresses
-import dns from 'dns';
-if (dns.setDefaultResultOrder) {
-  dns.setDefaultResultOrder('ipv4first');
-}
+  connectionTimeout: 30000,
+  greetingTimeout: 30000,
+  socketTimeout: 60000,
+
+  logger: true,
+  debug: true,
+});
 
 export default transporter;
