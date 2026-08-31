@@ -10,7 +10,8 @@ const transporter = nodemailer.createTransport({
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS
   },
-  tls: { rejectUnauthorized: false }
+  tls: { rejectUnauthorized: false },
+  family: 4 // Force IPv4 explicitly at the socket level
 });
 
 // Force IPv4 if using Node 18+ to prevent ENETUNREACH on IPv6 addresses
