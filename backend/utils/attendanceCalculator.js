@@ -46,7 +46,7 @@ export const formatTimerHHMM = (seconds) => {
 export const parseTimeToDate = (dateStr, timeStr, isCheckOut = false) => {
   if (!timeStr || !dateStr) return null;
   const str = String(timeStr).trim();
-  if (str === '' || str === '--:--' || str === 'null' || str === 'undefined' || str === '—') return null;
+  if (str === '' || str === '--:--' || str === 'null' || str === 'undefined' || str === '—' || str === '--' || str === '--:-- --') return null;
 
   let hours = 0;
   let minutes = 0;
@@ -166,7 +166,7 @@ export const calculateAttendanceStatus = (record = {}, context = {}) => {
   const currentTotalMins = cHour * 60 + cMin;
   const thresholdMins = 9 * 60 + 30; // Official late threshold: 09:30 AM
   const lateMinutes = Math.max(0, currentTotalMins - thresholdMins);
-  const isLateCheckIn = currentTotalMins >= thresholdMins; // Late starts at 09:30 (inclusive)
+  const isLateCheckIn = currentTotalMins > thresholdMins; // Late starts at 09:31 (inclusive)
 
   // Evaluation timestamp: if checkout exists, evaluate up to checkOut; else up to currentTime
   const isCheckedOut = !!checkOut;
@@ -335,33 +335,45 @@ export const validateAdminStatusUpdate = (requestedStatus, checkIn, checkOut) =>
   const hasCheckOut = !!checkOut && !isNaN(new Date(checkOut).getTime());
 
   if (requestedStatus === 'Present') {
-    if (!hasCheckIn || !hasCheckOut) {
+    if (!hasCheckIn) {
       return {
         isValid: false,
-        message: 'Attendance status cannot be changed to Present without updating both Check-in and Check-out times. Please update Check-in and/or Check-out time.'
+        message: 'Attendance status cannot be set to Present without a valid Check-in time. Please provide Check-in time.'
       };
     }
-    const cIn = new Date(checkIn);
-    const cOut = new Date(checkOut);
-    const outTimeStr = getTimeStringIST(cOut);
-    if (outTimeStr === '00:00') {
-      const checkInTimeStr = getTimeStringIST(cIn);
-      if (checkInTimeStr >= '13:30') {
+    
+    // Only calculate and check duration if checkOut is also provided
+    if (hasCheckIn && hasCheckOut) {
+      const cIn = new Date(checkIn);
+      const cOut = new Date(checkOut);
+      const outTimeStr = getTimeStringIST(cOut);
+      if (outTimeStr === '00:00') {
+        const checkInTimeStr = getTimeStringIST(cIn);
+        if (checkInTimeStr >= '13:30') {
+          return {
+            isValid: false,
+            message: 'Check-in time is at or after 13:30. Cannot set status to Present with 00:00 checkout for afternoon check-in.'
+          };
+        }
+        return { isValid: true, message: '' };
+      }
+
+      let diffMs = cOut.getTime() - cIn.getTime();
+      const mins = Math.floor(diffMs / (1000 * 60));
+      
+      if (diffMs < 0) {
         return {
           isValid: false,
-          message: 'Check-in time is at or after 13:30. Cannot set status to Present with 00:00 checkout for afternoon check-in.'
+          message: 'Check-out time must be after Check-in time.'
         };
       }
-      return { isValid: true, message: '' };
-    }
 
-    let diffMs = cOut.getTime() - cIn.getTime();
-    const mins = Math.floor(diffMs / (1000 * 60));
-    if (mins < 495) { // < 8h 15m
-      return {
-        isValid: false,
-        message: `Attendance status cannot be set to Present because the total working duration (${Math.floor(mins/60)}h ${mins%60}m) is less than 8 hours 15 minutes (495 minutes). Please update Check-in and/or Check-out time.`
-      };
+      if (mins < 495) { // < 8h 15m
+        return {
+          isValid: false,
+          message: `Attendance status cannot be set to Present because the total working duration (${Math.floor(mins/60)}h ${mins%60}m) is less than 8 hours 15 minutes (495 minutes). Please update Check-in and/or Check-out time.`
+        };
+      }
     }
   }
 

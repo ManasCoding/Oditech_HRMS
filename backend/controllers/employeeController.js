@@ -11,7 +11,7 @@ import LeaveRequest from '../models/LeaveRequest.js';
 import LeaveTransaction from '../models/LeaveTransaction.js';
 import Holiday from '../models/Holiday.js';
 import { getLeaveBalance } from './leaveAccrualController.js';
-import { calculateAttendanceStatus, ATTENDANCE_CONFIG } from '../utils/attendanceCalculator.js';
+import { calculateAttendanceStatus, ATTENDANCE_CONFIG, getTodayDateIST } from '../utils/attendanceCalculator.js';
 
 // Helper for distance calculation
 const getDistance = (lat1, lon1, lat2, lon2) => {
@@ -125,11 +125,7 @@ export const checkIn = async (req, res) => {
   // Get local date in YYYY-MM-DD format (Asia/Kolkata)
   const tzStr = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
   const localDate = new Date(tzStr);
-  
-  const year = localDate.getFullYear();
-  const month = String(localDate.getMonth() + 1).padStart(2, '0');
-  const day = String(localDate.getDate()).padStart(2, '0');
-  const today = `${year}-${month}-${day}`;
+  const today = getTodayDateIST();
 
   // Block check-in on Sunday (day 0)
   if (localDate.getDay() === 0) {
@@ -138,18 +134,30 @@ export const checkIn = async (req, res) => {
   
   try {
     let attendance = await Attendance.findOne({ employeeId, date: today });
-    if (!attendance) {
-      // Validate GPS Geofence
-      if (lat && lng) {
-        const settings = await SystemSetting.find({ key: { $in: ['office_lat', 'office_lng', 'geofence_radius'] } });
-        const settingsMap = settings.reduce((acc, s) => ({ ...acc, [s.key]: parseFloat(s.value) }), {});
-        
-        if (settingsMap.office_lat && settingsMap.office_lng && settingsMap.geofence_radius) {
-          const distance = getDistance(lat, lng, settingsMap.office_lat, settingsMap.office_lng);
-          if (distance > settingsMap.geofence_radius) {
-            return res.json({ success: false, message: `Check-in failed: You are ${Math.round(distance)}m away from the office. Must be within ${settingsMap.geofence_radius}m.` });
-          }
-        }
+    if (!attendance || !attendance.checkIn) {
+      // Validate GPS Geofence strictly on backend
+      const numLat = parseFloat(lat);
+      const numLng = parseFloat(lng);
+      if (isNaN(numLat) || isNaN(numLng)) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Location permission and valid GPS coordinates are required to check in.' 
+        });
+      }
+
+      const settings = await SystemSetting.find({ key: { $in: ['office_lat', 'office_lng', 'geofence_radius'] } });
+      const settingsMap = settings.reduce((acc, s) => ({ ...acc, [s.key]: parseFloat(s.value) }), {});
+      
+      const officeLat = settingsMap.office_lat || 20.2961;
+      const officeLng = settingsMap.office_lng || 85.8331;
+      const allowedRadius = settingsMap.geofence_radius || 50;
+
+      const distance = getDistance(numLat, numLng, officeLat, officeLng);
+      if (distance > allowedRadius) {
+        return res.status(400).json({ 
+          success: false, 
+          message: `Check-in failed: You are ${Math.round(distance)}m away from the office. Must be within ${allowedRadius}m.` 
+        });
       }
 
       // Official check-in threshold: 9:30 AM IST
@@ -179,8 +187,8 @@ export const checkIn = async (req, res) => {
         approvalRequestedAt = now;
         exceptionType = 'Half Day';
         status = 'Half Day';
-      } else if (currentTimeStr >= LATE_THRESHOLD) {
-        // At or after 9:30 AM — Late, requires approval
+      } else if (currentTimeStr > LATE_THRESHOLD) {
+        // After 9:30 AM — Late, requires approval
         isLate = true;
         checkInApprovalStatus = 'Pending';
         approvalRequestedAt = now;
@@ -189,19 +197,33 @@ export const checkIn = async (req, res) => {
       }
       // else: before 9:30 AM — on time, no approval needed
 
-      attendance = await Attendance.create({
-        employeeId,
-        date: today,
-        checkIn: now,
-        location: { lat, lng },
-        status,
-        isLate,
-        lateMinutes,
-        checkInApprovalStatus,
-        approvalRequestedAt,
-        exceptionType,
-        originalStatus
-      });
+      if (!attendance) {
+        attendance = await Attendance.create({
+          employeeId,
+          date: today,
+          checkIn: now,
+          location: { lat, lng },
+          status,
+          isLate,
+          lateMinutes,
+          checkInApprovalStatus,
+          approvalRequestedAt,
+          exceptionType,
+          originalStatus
+        });
+      } else {
+        // Attendance record existed without checkIn (e.g. from timesheet remarks)
+        attendance.checkIn = now;
+        attendance.location = { lat, lng };
+        attendance.status = status;
+        attendance.isLate = isLate;
+        attendance.lateMinutes = lateMinutes;
+        attendance.checkInApprovalStatus = checkInApprovalStatus;
+        attendance.approvalRequestedAt = approvalRequestedAt;
+        attendance.exceptionType = exceptionType;
+        attendance.originalStatus = originalStatus;
+        await attendance.save();
+      }
 
       const lateApprovalPending = checkInApprovalStatus === 'Pending';
       return res.json({ success: true, attendance: applyDisplayStatus(attendance), alreadyCheckedIn: false, lateApprovalPending });
@@ -227,49 +249,44 @@ export const checkIn = async (req, res) => {
 export const checkOut = async (req, res) => {
   const { employeeId } = req.body;
   const now = new Date();
-  
-  const tzStr = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
-  const localDate = new Date(tzStr);
-  
-  const year = localDate.getFullYear();
-  const month = String(localDate.getMonth() + 1).padStart(2, '0');
-  const day = String(localDate.getDate()).padStart(2, '0');
-  const today = `${year}-${month}-${day}`;
+  const today = getTodayDateIST();
 
   try {
     let attendance = await Attendance.findOne({ employeeId, date: today });
-    if (!attendance) {
-      return res.status(404).json({ success: false, message: 'No check-in record found for today.' });
+    if (!attendance || !attendance.checkIn) {
+      return res.status(400).json({ success: false, message: 'No check-in record found for today.' });
+    }
+
+    if (attendance.checkOut) {
+      return res.json({ success: true, attendance: applyDisplayStatus(attendance), message: 'Already checked out today.' });
     }
 
     const checkOutTime = now;
-    if (attendance.checkIn) {
-      attendance.checkOut = checkOutTime;
-      attendance.workStatus = 'Completed';
-      attendance.lastExitTime = null;
+    attendance.checkOut = checkOutTime;
+    attendance.workStatus = 'Completed';
+    attendance.lastExitTime = null;
 
-      const calc = calculateAttendanceStatus(attendance, { currentTime: checkOutTime });
-      attendance.status = calc.status;
-      attendance.workHours = calc.workHours;
-      attendance.overtime = calc.overtime;
-      attendance.totalWorkingSeconds = calc.workingSeconds;
-      attendance.totalOvertimeSeconds = calc.overtimeSeconds;
+    const calc = calculateAttendanceStatus(attendance, { currentTime: checkOutTime });
+    attendance.status = calc.status;
+    attendance.workHours = calc.workHours;
+    attendance.overtime = calc.overtime;
+    attendance.totalWorkingSeconds = calc.workingSeconds;
+    attendance.totalOvertimeSeconds = calc.overtimeSeconds;
 
-      const fullDayThresholdSec = (ATTENDANCE_CONFIG.FULL_DAY_THRESHOLD_MINUTES || 495) * 60;
-      if (calc.workingSeconds < fullDayThresholdSec) {
-        if (attendance.checkInApprovalStatus === 'Not Required') {
-          attendance.status = calc.status;
-          attendance.exceptionType = calc.status === 'Absent' ? 'Absent' : 'Half Day';
-          attendance.checkInApprovalStatus = 'Pending';
-          attendance.approvalRequestedAt = now;
-        } else if (attendance.checkInApprovalStatus === 'Pending' && attendance.exceptionType === 'Late') {
-          attendance.exceptionType = calc.status === 'Absent' ? 'Absent' : 'Half Day';
-          attendance.status = calc.status;
-        }
+    const fullDayThresholdSec = (ATTENDANCE_CONFIG.FULL_DAY_THRESHOLD_MINUTES || 495) * 60;
+    if (calc.workingSeconds < fullDayThresholdSec) {
+      if (attendance.checkInApprovalStatus === 'Not Required') {
+        attendance.status = calc.status;
+        attendance.exceptionType = calc.status === 'Absent' ? 'Absent' : 'Half Day';
+        attendance.checkInApprovalStatus = 'Pending';
+        attendance.approvalRequestedAt = now;
+      } else if (attendance.checkInApprovalStatus === 'Pending' && attendance.exceptionType === 'Late') {
+        attendance.exceptionType = calc.status === 'Absent' ? 'Absent' : 'Half Day';
+        attendance.status = calc.status;
       }
-
-      await attendance.save();
     }
+
+    await attendance.save();
 
     return res.json({ success: true, attendance: applyDisplayStatus(attendance), message: 'Checked out successfully.' });
   } catch (error) {
@@ -281,18 +298,11 @@ export const checkOut = async (req, res) => {
 export const markGeofenceExit = async (req, res) => {
   const { employeeId } = req.body;
   const now = new Date();
-  
-  const tzStr = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
-  const localDate = new Date(tzStr);
-  
-  const year = localDate.getFullYear();
-  const month = String(localDate.getMonth() + 1).padStart(2, '0');
-  const day = String(localDate.getDate()).padStart(2, '0');
-  const today = `${year}-${month}-${day}`;
+  const today = getTodayDateIST();
   
   try {
     let attendance = await Attendance.findOne({ employeeId, date: today });
-    if (!attendance) {
+    if (!attendance || !attendance.checkIn) {
       return res.status(404).json({ success: false, message: 'No check-in record found for today.' });
     }
     
@@ -311,14 +321,18 @@ export const markGeofenceExit = async (req, res) => {
 
 export const getTodayAttendance = async (req, res) => {
   try {
-    const now = new Date();
-    const tzStr = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
-    const localDate = new Date(tzStr);
-    const today = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, '0')}-${String(localDate.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
     let attendance = await Attendance.findOne({ employeeId: req.params.employeeId, date: today });
 
+    if (!attendance || !attendance.checkIn) {
+      return res.json({
+        success: true,
+        attendance: null,
+        status: 'NOT_CHECKED_IN'
+      });
+    }
 
-    res.json({ success: true, attendance: applyDisplayStatus(attendance) });
+    res.json({ success: true, attendance: applyDisplayStatus(attendance), status: attendance.status });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -676,7 +690,7 @@ export const createBulkTasks = async (req, res) => {
       await Attendance.findOneAndUpdate(
         { employeeId, date },
         updateData,
-        { upsert: true, setDefaultsOnInsert: true }
+        { upsert: false }
       );
     }
 

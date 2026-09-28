@@ -9,6 +9,6 @@ export const ATTENDANCE_CONFIG = {
   LUNCH_START: '13:30',       // 01:30 PM
   LUNCH_END: '14:15',         // 02:15 PM
   MAX_OVERTIME_MINUTES: 60,   // 1 Hour
-  LATE_THRESHOLD: '09:30'     // 09:30 AM
+  LATE_THRESHOLD: '09:31'     // 09:31 AM
 };
 

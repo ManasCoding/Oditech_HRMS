@@ -35,7 +35,8 @@ const EmployeeSchema = new mongoose.Schema({
   branchName: { type: String },
   panNumber: { type: String },
   aadharNumber: { type: String },
-  upiId: { type: String }
+  upiId: { type: String },
+  pfAccount: { type: String }
 }, { timestamps: true });
 
 export default mongoose.model('Employee', EmployeeSchema);

@@ -3,7 +3,7 @@ import Attendance from '../models/Attendance.js';
 import Employee from '../models/Employee.js';
 import LeaveTransaction from '../models/LeaveTransaction.js';
 import { calculateAttendanceStatus } from './attendanceCalculator.js';
-
+import { processEndOfDayReport } from '../workers/endOfDayReportWorker.js';
 
 export const initCronJobs = () => {
   // Runs on the 1st of every month at 01:00 AM
@@ -59,5 +59,17 @@ export const initCronJobs = () => {
       console.error('Monthly accrual cron error:', error);
     }
   });
+
   // ───────────────────────────────────────────────────────────────────────
+  // Daily End of Day Work Report
+  const reportTime = process.env.REPORT_END_TIME || '18:00';
+  const [reportHour, reportMinute] = reportTime.split(':');
+  const reportTimezone = process.env.REPORT_TIMEZONE || 'Asia/Kolkata';
+
+  cron.schedule(`${reportMinute} ${reportHour} * * *`, async () => {
+    console.log(`Running End of Day Report Job at ${reportTime} (${reportTimezone})...`);
+    await processEndOfDayReport();
+  }, {
+    timezone: reportTimezone
+  });
 };

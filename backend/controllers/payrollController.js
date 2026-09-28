@@ -222,37 +222,51 @@ const calcAttendanceSummary = async (employeeId, monthNum, yearNum) => {
 
   // ── 8. Effective counts ───────────────────────────────────────────────────────
   // Holidays: prefer Holiday-model entries, fall back to attendance-sourced
-  const effectiveHolidays   = nonSundayHolidays > 0 ? nonSundayHolidays : attendanceHolidays;
+  const effectiveHolidays   = Math.max(nonSundayHolidays, attendanceHolidays);
   const effectiveWeeklyOffs = weeklyOffs + attendanceWeekends;
 
-  // Working days: total calendar minus Sundays (Holidays are paid, so they are part of working days for salary division)
-  totalWorkingDays = totalCalDays - weeklyOffs;
+  // Working days: total calendar minus Sundays and minus Holidays (treated as non-working days)
+  totalWorkingDays = Math.max(0, totalCalDays - effectiveWeeklyOffs - effectiveHolidays);
 
   // ── 9. Absent = working days not covered by any positive status ───────────────
   // Only count days up to today — don't mark future unrecorded days as absent
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  // Count past working days (excluding weekends, but INCLUDING holidays since they are paid days) up to today
+  // Count past working days (excluding weekends) up to today
   let pastWorkingDays = 0;
+  let pastGlobalHolidays = 0;
+  
   const cur2 = new Date(periodStart + 'T00:00:00');
   const periodEndDate = new Date(periodEnd + 'T00:00:00');
   const effectiveEnd = today < periodEndDate ? today : periodEndDate;
   while (cur2 <= effectiveEnd) {
     const isSun2 = cur2.getDay() === 0;
-    if (!isSun2) pastWorkingDays++;
+    const y = cur2.getFullYear();
+    const m = String(cur2.getMonth() + 1).padStart(2, '0');
+    const d = String(cur2.getDate()).padStart(2, '0');
+    const dateStr2 = `${y}-${m}-${d}`;
+    
+    if (!isSun2) {
+      pastWorkingDays++;
+      if (holidayDateSet.has(dateStr2)) {
+        pastGlobalHolidays++;
+      }
+    }
     cur2.setDate(cur2.getDate() + 1);
   }
 
-  // Explicitly-absent records + truly unmarked past days
-  const accounted   = present + halfDay + paidLeave + unpaidLeave + effectiveHolidays + absentFromAtt;
+  // Explicitly-absent records + truly unmarked past working days
+  // We use pastEffectiveHolidays because future holidays shouldn't artificially reduce today's unmarked absences
+  const pastEffectiveHolidays = Math.max(pastGlobalHolidays, attendanceHolidays);
+  const accounted   = present + halfDay + paidLeave + unpaidLeave + absentFromAtt + pastEffectiveHolidays;
   const unmarked    = Math.max(0, pastWorkingDays - accounted);
   const totalAbsent = absentFromAtt + unmarked;
 
 
   // ── 10. Payable days ──────────────────────────────────────────────────────────
-  // present + paidLeave + holidays + halfDay×0.5, capped at totalCalDays minus effectiveWeeklyOffs
-  const rawPayable  = present + paidLeave + effectiveHolidays + (halfDay * 0.5);
+  // ONLY present + paidLeave + halfDay×0.5 (Holidays are excluded from working days, so they are not payable days either)
+  const rawPayable  = present + paidLeave + (halfDay * 0.5);
   const maxPayable = Math.max(0, totalCalDays - effectiveWeeklyOffs);
   const payableDays = Math.min(Math.round(rawPayable * 10) / 10, maxPayable);
 

@@ -10,7 +10,7 @@ import {
   updateAttendanceStatus, updateAttendanceRecord,
   getAllResignations, updateResignationStatus, getResignationById, updateResignationChecklist, getEmployeeTasksByDate,
   getLateApprovals, approveLateCheckIn, rejectLateCheckIn,
-  checkAdminEmail, updateAdmin, upgradeEmployee
+  checkAdminEmail, updateAdmin, upgradeEmployee, emailHourlyReportsExcel
 } from '../controllers/adminController.js';
 import { getAdminTimesheets, getTimesheetById } from '../controllers/timesheetController.js';
 import { upload } from '../cloudinary.js';
@@ -64,6 +64,7 @@ router.put('/admins/:id', updateAdmin);
 router.delete('/admins/:id', deleteAdmin);
 router.get('/reports/hourly', getHourlyReports);
 router.get('/reports/hourly/:id', getEmployeeHourlyReports);
+router.get('/reports/hourly/email/excel', emailHourlyReportsExcel);
 router.get('/reports/export/excel', exportAttendanceExcel);
 router.get('/reports/export/pdf', exportAttendancePdf);
 

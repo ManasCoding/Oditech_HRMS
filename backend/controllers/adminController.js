@@ -1,4 +1,4 @@
-﻿import Employee from '../models/Employee.js';
+import Employee from '../models/Employee.js';
 import ActivityLog from '../models/ActivityLog.js';
 import Attendance from '../models/Attendance.js';
 import LeaveRequest from '../models/LeaveRequest.js';
@@ -18,7 +18,8 @@ import bcrypt from 'bcrypt';
 import exceljs from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { getIo } from '../socket.js';
-import { calculateAttendanceStatus, validateAdminStatusUpdate, calculateWorkHours, parseTimeToDate, getTimeStringIST } from '../utils/attendanceCalculator.js';
+import { calculateAttendanceStatus, validateAdminStatusUpdate, calculateWorkHours, parseTimeToDate, getTimeStringIST, getTodayDateIST } from '../utils/attendanceCalculator.js';
+import { sendEmail } from '../services/notificationService.js';
 
 export const getEmployees = async (req, res) => {
   try {
@@ -161,8 +162,7 @@ export const getLogs = async (req, res) => {
 
 export const getStats = async (req, res) => {
   try {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
     const targetDate = req.query.date || today;
     
     const employees = await Employee.find({ status: 'Active' });
@@ -183,8 +183,8 @@ export const getStats = async (req, res) => {
       const att = attendances.find(a => a.employeeId.toString() === emp._id.toString());
       const leave = leaves.find(l => l.employeeId.toString() === emp._id.toString());
 
-      if (att) {
-        if (att.status === 'Present' || att.status === 'Late') {
+      if (att && att.checkIn) {
+        if (att.status === 'Present' || att.status === 'Late' || att.status === 'Site Visit') {
           presentToday++;
           if (att.status === 'Late') lateToday++;
         } else if (att.status === 'Half Day') {
@@ -217,8 +217,7 @@ export const getStats = async (req, res) => {
 
 export const getAllAttendance = async (req, res) => {
   try {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
     const targetDate = req.query.date || today;
     
     const employees = await Employee.find({ status: 'Active' }).select('fullName empCode profileImage department role designation');
@@ -242,7 +241,7 @@ export const getAllAttendance = async (req, res) => {
       let checkInApprovalStatus = 'Not Required';
       let exceptionType = 'None';
 
-      if (att) {
+      if (att && att.checkIn) {
         const calc = calculateAttendanceStatus(att, { isLeave: !!leave, leaveType: leave ? 'On Leave' : null });
         status = calc.status;
         checkIn = att.checkIn;
@@ -476,8 +475,7 @@ export const updateAdmin = async (req, res) => {
 export const getHourlyReports = async (req, res) => {
   try {
     const { date, department, employeeId, status, search, page = 1, limit = 8 } = req.query;
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
     const targetDate = date || today;
     
     // Build filter
@@ -704,8 +702,7 @@ export const deleteDocument = async (req, res) => {
 
 export const getWeeklyAttendance = async (req, res) => {
   try {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
     const endDate = req.query.endDate || today;
     const end = new Date(endDate);
     const weekly = [];
@@ -716,9 +713,9 @@ export const getWeeklyAttendance = async (req, res) => {
       const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
 
-      const present = await Attendance.countDocuments({ date: dateStr, status: { $in: ['Present', 'Late'] } });
-      const late = await Attendance.countDocuments({ date: dateStr, status: 'Late' });
-      const half = await Attendance.countDocuments({ date: dateStr, status: 'Half Day' });
+      const present = await Attendance.countDocuments({ date: dateStr, checkIn: { $exists: true, $ne: null }, status: { $in: ['Present', 'Late'] } });
+      const late = await Attendance.countDocuments({ date: dateStr, checkIn: { $exists: true, $ne: null }, status: 'Late' });
+      const half = await Attendance.countDocuments({ date: dateStr, checkIn: { $exists: true, $ne: null }, status: 'Half Day' });
 
       weekly.push({ name: dayName, present, late, half, fullDate: dateStr });
     }
@@ -731,11 +728,10 @@ export const getWeeklyAttendance = async (req, res) => {
 
 export const getPresentEmployees = async (req, res) => {
   try {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
     const date = req.query.date || today;
 
-    const attendances = await Attendance.find({ date, status: { $in: ['Present', 'Late'] } }).populate('employeeId');
+    const attendances = await Attendance.find({ date, checkIn: { $exists: true, $ne: null }, status: { $in: ['Present', 'Late', 'Site Visit'] } }).populate('employeeId');
     const employees = attendances.map(a => a.employeeId).filter(e => e && e.status === 'Active');
     res.json({ success: true, employees });
   } catch (error) {
@@ -745,11 +741,10 @@ export const getPresentEmployees = async (req, res) => {
 
 export const getHalfDayEmployees = async (req, res) => {
   try {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
     const date = req.query.date || today;
 
-    const attendances = await Attendance.find({ date, status: 'Half Day' }).populate('employeeId');
+    const attendances = await Attendance.find({ date, checkIn: { $exists: true, $ne: null }, status: 'Half Day' }).populate('employeeId');
     const employees = attendances.map(a => a.employeeId).filter(e => e && e.status === 'Active');
     res.json({ success: true, employees });
   } catch (error) {
@@ -759,11 +754,10 @@ export const getHalfDayEmployees = async (req, res) => {
 
 export const getLateEmployees = async (req, res) => {
   try {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
     const date = req.query.date || today;
 
-    const attendances = await Attendance.find({ date, status: 'Late' }).populate('employeeId');
+    const attendances = await Attendance.find({ date, checkIn: { $exists: true, $ne: null }, status: 'Late' }).populate('employeeId');
     const employees = attendances.map(a => a.employeeId).filter(e => e && e.status === 'Active');
     res.json({ success: true, employees });
   } catch (error) {
@@ -773,8 +767,7 @@ export const getLateEmployees = async (req, res) => {
 
 export const getAbsentEmployees = async (req, res) => {
   try {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
     const date = req.query.date || today;
 
     const allActiveEmployees = await Employee.find({ status: 'Active' });
@@ -785,11 +778,14 @@ export const getAbsentEmployees = async (req, res) => {
       toDate: { $gte: date } 
     });
 
-    const attendedIds = attendances.map(a => a.employeeId.toString());
+    const presentOrLateIds = attendances
+      .filter(a => a.checkIn && a.status !== 'Absent')
+      .map(a => a.employeeId.toString());
+      
     const leaveIds = leaves.map(l => l.employeeId.toString());
 
     const absentEmployees = allActiveEmployees.filter(emp => 
-      !attendedIds.includes(emp._id.toString()) && !leaveIds.includes(emp._id.toString())
+      !presentOrLateIds.includes(emp._id.toString()) && !leaveIds.includes(emp._id.toString())
     );
 
     res.json({ success: true, employees: absentEmployees });
@@ -800,8 +796,7 @@ export const getAbsentEmployees = async (req, res) => {
 
 export const getActiveLeaveEmployees = async (req, res) => {
   try {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
     const date = req.query.date || today;
 
     const leaves = await LeaveRequest.find({ 
@@ -832,8 +827,8 @@ export const getEmployeeNotes = async (req, res) => {
 export const exportAttendanceExcel = async (req, res) => {
   try {
     const { date } = req.query;
-    const now = new Date();
-    const targetDate = date || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
+    const targetDate = date || today;
 
     const attendances = await Attendance.find({ date: targetDate }).populate('employeeId', 'fullName empCode department');
 
@@ -855,10 +850,10 @@ export const exportAttendanceExcel = async (req, res) => {
         empCode: att.employeeId?.empCode || 'N/A',
         name: att.employeeId?.fullName || 'N/A',
         department: att.employeeId?.department || 'N/A',
-        status: att.status,
+        status: att.checkIn ? att.status : 'Absent',
         checkIn: att.checkIn ? new Date(att.checkIn).toLocaleTimeString() : 'N/A',
         checkOut: att.checkOut ? new Date(att.checkOut).toLocaleTimeString() : 'N/A',
-        workHours: att.workHours || '0h 0m'
+        workHours: att.checkIn ? (att.workHours || '0h 0m') : '0h 0m'
       });
     });
 
@@ -875,8 +870,8 @@ export const exportAttendanceExcel = async (req, res) => {
 export const exportAttendancePdf = async (req, res) => {
   try {
     const { date } = req.query;
-    const now = new Date();
-    const targetDate = date || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const today = getTodayDateIST();
+    const targetDate = date || today;
 
     const attendances = await Attendance.find({ date: targetDate }).populate('employeeId', 'fullName empCode');
 
@@ -916,8 +911,10 @@ export const updateEmployeeCheckIn = async (req, res) => {
     let cleanDateStr = date;
     if (cleanDateStr.includes('T')) cleanDateStr = cleanDateStr.split('T')[0];
 
+    const isCheckInEmpty = !checkInTime || String(checkInTime).trim() === '' || String(checkInTime).trim() === '--' || String(checkInTime).trim() === '--:--';
     const checkInDate = parseTimeToDate(cleanDateStr, checkInTime, false);
-    if (!checkInDate) {
+    
+    if (!isCheckInEmpty && !checkInDate) {
       return res.status(400).json({ success: false, message: 'Invalid check-in time format' });
     }
 
@@ -935,7 +932,7 @@ export const updateEmployeeCheckIn = async (req, res) => {
     }
 
     // Validation: if checkOut exists, ensure checkOut is after checkIn (unless 00:00)
-    if (record.checkOut) {
+    if (record.checkIn && record.checkOut) {
       const cIn = new Date(record.checkIn);
       const cOut = new Date(record.checkOut);
       let diffMs = cOut.getTime() - cIn.getTime();
@@ -969,15 +966,17 @@ export const updateEmployeeCheckOut = async (req, res) => {
   try {
     const { employeeId, date, checkOutTime } = req.body;
     
-    if (!employeeId || !date || !checkOutTime) {
+    if (!employeeId || !date || checkOutTime === undefined) {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
     let cleanDateStr = date;
     if (cleanDateStr.includes('T')) cleanDateStr = cleanDateStr.split('T')[0];
 
+    const isCheckOutEmpty = !checkOutTime || String(checkOutTime).trim() === '' || String(checkOutTime).trim() === '--' || String(checkOutTime).trim() === '--:--';
     const checkOutDate = parseTimeToDate(cleanDateStr, checkOutTime, true);
-    if (!checkOutDate) {
+    
+    if (!isCheckOutEmpty && !checkOutDate) {
       return res.status(400).json({ success: false, message: 'Invalid check-out time format' });
     }
 
@@ -1478,3 +1477,81 @@ export const rejectLateCheckIn = async (req, res) => {
 };
 
 
+export const emailHourlyReportsExcel = async (req, res) => {
+  try {
+    const { date, department, employeeId, status, search } = req.query;
+    const today = getTodayDateIST();
+    const targetDate = date || today;
+    
+    // Build filter
+    let query = { date: targetDate };
+    if (status && status !== 'All Status') query.workStatus = status;
+    if (employeeId && employeeId !== 'All Employees') query.employeeId = employeeId;
+    
+    if (department && department !== 'All Departments') {
+      const deptEmployees = await Employee.find({ department }).select('_id');
+      const deptIds = deptEmployees.map(e => e._id);
+      query.employeeId = { $in: deptIds };
+    }
+
+    const attendances = await Attendance.find(query)
+      .populate('employeeId', 'fullName empCode department profileImage')
+      .sort({ createdAt: -1 });
+
+    const workbook = new exceljs.Workbook();
+    const worksheet = workbook.addWorksheet('Hourly Report');
+
+    worksheet.columns = [
+      { header: '#', key: 'index', width: 5 },
+      { header: 'Employee Name', key: 'name', width: 25 },
+      { header: 'Employee ID', key: 'empCode', width: 15 },
+      { header: 'Department', key: 'department', width: 20 },
+      { header: 'Date', key: 'date', width: 15 },
+      { header: 'Total Hours', key: 'workHours', width: 15 },
+      { header: 'Overtime', key: 'overtime', width: 15 },
+      { header: 'Status', key: 'status', width: 15 }
+    ];
+
+    attendances.forEach((att, index) => {
+      worksheet.addRow({
+        index: index + 1,
+        name: att.employeeId?.fullName || 'N/A',
+        empCode: att.employeeId?.empCode || 'N/A',
+        department: att.employeeId?.department || 'N/A',
+        date: att.date,
+        workHours: att.workHours || '0h 0m',
+        overtime: att.overtime || '0h 0m',
+        status: att.workStatus
+      });
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+
+    const recipient = process.env.REPORT_EMAIL_TO;
+    if (!recipient) {
+      return res.status(400).json({ success: false, message: 'REPORT_EMAIL_TO is not configured in .env' });
+    }
+
+    const [year, month, day] = targetDate.split('-');
+    const formattedDate = `${day}-${month}-${year}`;
+    const subject = `HRMS - Hourly Work Report - ${formattedDate}`;
+    const htmlBody = `
+      <p>Dear Sir,</p>
+      <p>Please find attached the Hourly Work Report for ${formattedDate}.</p>
+      <p>Regards,<br/>HRMS - Oditech Global</p>
+    `;
+
+    const attachments = [{
+      filename: `Hourly_Report_${formattedDate}.xlsx`,
+      content: buffer,
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    }];
+
+    await sendEmail(recipient, subject, htmlBody, attachments);
+
+    res.json({ success: true, message: 'Report sent to email successfully' });
+  } catch (error) {
+    console.error('emailHourlyReportsExcel error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};

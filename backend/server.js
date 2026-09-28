@@ -82,7 +82,7 @@ const seedData = async () => {
     const defaultSettings = [
       { key: 'workday_start', value: '09:30' },
       { key: 'logout_time', value: '18:30' },
-      { key: 'late_threshold', value: '09:40' },
+      { key: 'late_threshold', value: '09:31' },
       { key: 'max_work_hours', value: 9.0 },
       { key: 'casual_leave', value: 12 },
       { key: 'sick_leave', value: 10 },
