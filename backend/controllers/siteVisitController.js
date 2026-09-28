@@ -227,6 +227,73 @@ export const checkOutSiteVisit = async (req, res) => {
   }
 };
 
+// Admin Force-Stop an Active Visit
+export const adminStopVisit = async (req, res) => {
+  try {
+    const visit = await SiteVisit.findById(req.params.id);
+    if (!visit) return res.status(404).json({ success: false, message: 'Site Visit not found' });
+
+    if (visit.status !== 'Active') {
+      return res.status(400).json({ success: false, message: 'Only active visits can be stopped' });
+    }
+
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    let todayRecord = visit.dailyRecords.find(r => r.date === today);
+    let checkInTime = todayRecord?.checkIn || visit.approvedAt || visit.updatedAt || visit.createdAt;
+
+    if (todayRecord) {
+      todayRecord.checkOut = now;
+      todayRecord.workSummary = req.body.reason || 'Stopped by Admin';
+    } else {
+      visit.dailyRecords.push({
+        date: today,
+        checkIn: checkInTime,
+        checkOut: now,
+        workSummary: req.body.reason || 'Stopped by Admin'
+      });
+      todayRecord = visit.dailyRecords[visit.dailyRecords.length - 1];
+    }
+
+    const diffMs = now.getTime() - new Date(checkInTime).getTime();
+    const totalSecs = Math.max(0, Math.floor(diffMs / 1000));
+    const formattedTime = formatDuration(totalSecs);
+
+    visit.status = 'Completed';
+    visit.completedAt = now;
+    visit.timeTaken = formattedTime;
+    visit.totalTimeSeconds = totalSecs;
+    todayRecord.totalHours = formattedTime;
+
+    await visit.save();
+
+    // Sync with Attendance record
+    let attendance = await Attendance.findOne({ employeeId: visit.employeeId, date: today });
+    if (!attendance) {
+      attendance = new Attendance({
+        employeeId: visit.employeeId,
+        date: today,
+        checkIn: checkInTime,
+        checkOut: now,
+        status: 'Site Visit',
+        workStatus: 'Completed',
+        workHours: formattedTime
+      });
+      await attendance.save();
+    } else {
+      attendance.status = 'Site Visit';
+      attendance.checkOut = now;
+      attendance.workStatus = 'Completed';
+      attendance.workHours = formattedTime;
+      await attendance.save();
+    }
+
+    res.status(200).json({ success: true, siteVisit: visit });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // Get Employee Site Visits
 export const getEmployeeSiteVisits = async (req, res) => {
   try {

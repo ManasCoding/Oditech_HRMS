@@ -7,6 +7,7 @@ import {
   rejectSiteVisit,
   checkInSiteVisit,
   checkOutSiteVisit,
+  adminStopVisit,
   getEmployeeSiteVisits,
   getActiveVisits,
   getSiteVisitReports
@@ -24,5 +25,6 @@ router.post('/:id/approve', approveSiteVisit);
 router.post('/:id/reject', rejectSiteVisit);
 router.post('/:id/check-in', checkInSiteVisit);
 router.post('/:id/check-out', checkOutSiteVisit);
+router.post('/:id/admin-stop', adminStopVisit);
 
 export default router;
