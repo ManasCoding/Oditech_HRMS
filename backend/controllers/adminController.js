@@ -132,6 +132,25 @@ export const updateEmployee = async (req, res) => {
   }
 };
 
+export const updateEmployeeCredentials = async (req, res) => {
+  try {
+    const { gmailCredential, credentialPassword } = req.body;
+    const update = {};
+    if (gmailCredential !== undefined) update.gmailCredential = gmailCredential;
+    if (credentialPassword !== undefined) update.credentialPassword = credentialPassword;
+
+    const employee = await Employee.findByIdAndUpdate(
+      req.params.id,
+      { $set: update },
+      { new: true, runValidators: false }
+    );
+    if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
+    res.json({ success: true, employee });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 export const deleteEmployee = async (req, res) => {
   try {
     const { permanent } = req.query;

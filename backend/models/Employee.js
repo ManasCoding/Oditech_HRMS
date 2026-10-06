@@ -11,6 +11,9 @@ const EmployeeSchema = new mongoose.Schema({
   profileImage: { type: String },
   role: { type: String, default: 'Team Member' },
   password: { type: String, default: '123456' },
+  // Separate credential fields — not tied to login email
+  gmailCredential: { type: String, default: '' },
+  credentialPassword: { type: String, default: '' },
   
   // Employment Journey
   employmentType: { type: String, default: 'Regular' },
