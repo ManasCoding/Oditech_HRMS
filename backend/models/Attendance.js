@@ -45,7 +45,8 @@ const AttendanceSchema = new mongoose.Schema({
     lng: Number
   },
   lastExitTime: { type: Date },
-  remarks: { type: String }
+  remarks: { type: String },
+  hasAdminEdit: { type: Boolean, default: false }
 }, { timestamps: true });
 
 // Prevent duplicate attendance records per employee per date

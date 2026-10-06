@@ -11,6 +11,7 @@ import AttendanceAuditLog from '../models/AttendanceAuditLog.js';
 import LeaveTransaction from '../models/LeaveTransaction.js';
 import { getLeaveBalance } from './leaveAccrualController.js';
 import mongoose from 'mongoose';
+import AttendanceEditHistory from '../models/AttendanceEditHistory.js';
 import Resignation from '../models/Resignation.js';
 import Task from '../models/Task.js';
 import PerformanceRating from '../models/PerformanceRating.js';
@@ -918,6 +919,7 @@ export const updateEmployeeCheckIn = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid check-in time format' });
     }
 
+    let oldCheckIn = null;
     let record = await Attendance.findOne({ employeeId, date: cleanDateStr });
 
     if (!record) {
@@ -928,6 +930,7 @@ export const updateEmployeeCheckIn = async (req, res) => {
         workStatus: 'Completed'
       });
     } else {
+      oldCheckIn = record.checkIn;
       record.checkIn = checkInDate;
     }
 
@@ -956,6 +959,29 @@ export const updateEmployeeCheckIn = async (req, res) => {
     record.lateMinutes = calc.lateMinutes;
 
     await record.save();
+
+    // Check if checkIn actually changed
+    const oldCheckInStr = oldCheckIn ? new Date(oldCheckIn).getTime() : null;
+    const newCheckInStr = record.checkIn ? new Date(record.checkIn).getTime() : null;
+    
+    if (oldCheckInStr !== newCheckInStr) {
+      const admin = await Admin.findOne(); // Fallback to first admin if no token extracted
+      await AttendanceEditHistory.create({
+        attendanceId: record._id,
+        employeeId: record.employeeId,
+        editedBy: req.body.adminId || admin._id,
+        editedByName: req.body.adminName || admin.fullName || 'Admin',
+        changes: {
+          checkIn: {
+            oldValue: oldCheckIn ? getTimeStringIST(oldCheckIn) : null,
+            newValue: record.checkIn ? getTimeStringIST(record.checkIn) : null
+          }
+        },
+        reason: req.body.reason || 'Manual Admin Update'
+      });
+      record.hasAdminEdit = true;
+      await record.save();
+    }
     res.json({ success: true, record });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -980,6 +1006,7 @@ export const updateEmployeeCheckOut = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid check-out time format' });
     }
 
+    let oldCheckOut = null;
     let record = await Attendance.findOne({ employeeId, date: cleanDateStr });
 
     if (!record) {
@@ -990,11 +1017,12 @@ export const updateEmployeeCheckOut = async (req, res) => {
         workStatus: 'Completed'
       });
     } else {
+      oldCheckOut = record.checkOut;
       record.checkOut = checkOutDate;
     }
 
     // Validation: ensure checkOut is after checkIn (unless 00:00)
-    if (record.checkIn) {
+    if (record.checkIn && record.checkOut) {
       const cIn = new Date(record.checkIn);
       const cOut = new Date(record.checkOut);
       let diffMs = cOut.getTime() - cIn.getTime();
@@ -1018,6 +1046,29 @@ export const updateEmployeeCheckOut = async (req, res) => {
     record.lateMinutes = calc.lateMinutes;
 
     await record.save();
+
+    // Check if checkOut actually changed
+    const oldCheckOutStr = oldCheckOut ? new Date(oldCheckOut).getTime() : null;
+    const newCheckOutStr = record.checkOut ? new Date(record.checkOut).getTime() : null;
+    
+    if (oldCheckOutStr !== newCheckOutStr) {
+      const admin = await Admin.findOne(); // Fallback
+      await AttendanceEditHistory.create({
+        attendanceId: record._id,
+        employeeId: record.employeeId,
+        editedBy: req.body.adminId || admin._id,
+        editedByName: req.body.adminName || admin.fullName || 'Admin',
+        changes: {
+          checkOut: {
+            oldValue: oldCheckOut ? getTimeStringIST(oldCheckOut) : null,
+            newValue: record.checkOut ? getTimeStringIST(record.checkOut) : null
+          }
+        },
+        reason: req.body.reason || 'Manual Admin Update'
+      });
+      record.hasAdminEdit = true;
+      await record.save();
+    }
     res.json({ success: true, record });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -1130,6 +1181,9 @@ export const updateAttendanceRecord = async (req, res) => {
       return res.status(400).json({ success: false, message: validation.message });
     }
 
+    const oldCheckIn = record.checkIn;
+    const oldCheckOut = record.checkOut;
+
     if (checkIn !== undefined) record.checkIn = checkIn;
     if (checkOut !== undefined) record.checkOut = checkOut;
 
@@ -1147,6 +1201,44 @@ export const updateAttendanceRecord = async (req, res) => {
     }
     
     record.workStatus = 'Pending';
+    
+    // Check if checkIn or checkOut actually changed
+    const oldCheckInStr = oldCheckIn ? new Date(oldCheckIn).getTime() : null;
+    const newCheckInStr = record.checkIn ? new Date(record.checkIn).getTime() : null;
+    const oldCheckOutStr = oldCheckOut ? new Date(oldCheckOut).getTime() : null;
+    const newCheckOutStr = record.checkOut ? new Date(record.checkOut).getTime() : null;
+    
+    let hasEdits = false;
+    let editChanges = {};
+    
+    if (oldCheckInStr !== newCheckInStr) {
+      editChanges.checkIn = {
+        oldValue: oldCheckIn ? getTimeStringIST(oldCheckIn) : null,
+        newValue: record.checkIn ? getTimeStringIST(record.checkIn) : null
+      };
+      hasEdits = true;
+    }
+    if (oldCheckOutStr !== newCheckOutStr) {
+      editChanges.checkOut = {
+        oldValue: oldCheckOut ? getTimeStringIST(oldCheckOut) : null,
+        newValue: record.checkOut ? getTimeStringIST(record.checkOut) : null
+      };
+      hasEdits = true;
+    }
+    
+    if (hasEdits) {
+      const admin = await Admin.findOne(); // Fallback
+      await AttendanceEditHistory.create({
+        attendanceId: record._id || new mongoose.Types.ObjectId(), // Just in case it's new
+        employeeId: record.employeeId,
+        editedBy: req.body.adminId || req.body.updatedBy || admin._id,
+        editedByName: req.body.adminName || admin.fullName || 'Admin',
+        changes: editChanges,
+        reason: req.body.reason || 'Manual Admin Update'
+      });
+      record.hasAdminEdit = true;
+    }
+
     await record.save();
 
     const updatedBy = req.body.updatedBy || null;
@@ -1161,6 +1253,24 @@ export const updateAttendanceRecord = async (req, res) => {
     });
 
     res.json({ success: true, record });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getAttendanceEditHistory = async (req, res) => {
+  try {
+    const { attendanceId } = req.params;
+    const record = await Attendance.findById(attendanceId);
+    if (!record) {
+      return res.status(404).json({ success: false, message: 'Attendance record not found' });
+    }
+    const history = await AttendanceEditHistory.find({ attendanceId }).sort({ editedAt: -1 });
+    res.json({
+      success: true,
+      hasEdits: record.hasAdminEdit || history.length > 0,
+      history
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

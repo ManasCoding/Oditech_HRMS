@@ -7,7 +7,7 @@ import {
   getEmployeeHourlyReports, getPresentEmployees, getHalfDayEmployees, getLateEmployees,
   getAbsentEmployees, getActiveLeaveEmployees, getEmployeeNotes,
   exportAttendanceExcel, exportAttendancePdf, updateEmployeeCheckIn, updateEmployeeCheckOut,
-  updateAttendanceStatus, updateAttendanceRecord,
+  updateAttendanceStatus, updateAttendanceRecord, getAttendanceEditHistory,
   getAllResignations, updateResignationStatus, getResignationById, updateResignationChecklist, getEmployeeTasksByDate,
   getLateApprovals, approveLateCheckIn, rejectLateCheckIn,
   checkAdminEmail, updateAdmin, upgradeEmployee, emailHourlyReportsExcel
@@ -38,6 +38,7 @@ router.get('/attendance/absent', getAbsentEmployees);
 router.put('/attendance/checkin', updateEmployeeCheckIn);
 router.put('/attendance/checkout', updateEmployeeCheckOut);
 router.put('/attendance/status', updateAttendanceStatus);
+router.get('/attendance/:attendanceId/edit-history', getAttendanceEditHistory);
 router.patch('/attendance/:id', updateAttendanceRecord);
 
 // Late Check-In Approval Routes
