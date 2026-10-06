@@ -112,11 +112,36 @@ const seedData = async () => {
 };
 
 import { sanitizeAllAttendanceRecords } from './scripts/sanitizeAttendance.js';
+import Employee from './models/Employee.js';
+
+const migrateCredentials = async () => {
+  try {
+    // Copy old email/password into dedicated credential fields for any employee missing them
+    const employees = await Employee.find({}).lean();
+    let count = 0;
+    for (const emp of employees) {
+      const needsUpdate = !emp.gmailCredential || !emp.credentialPassword;
+      if (needsUpdate) {
+        await Employee.findByIdAndUpdate(emp._id, {
+          $set: {
+            gmailCredential: emp.gmailCredential || emp.email || '',
+            credentialPassword: emp.credentialPassword || emp.password || ''
+          }
+        });
+        count++;
+      }
+    }
+    if (count > 0) console.log(`✓ Migrated credentials for ${count} employees`);
+  } catch (err) {
+    console.error('Credential migration error:', err.message);
+  }
+};
 
 connectDB().then(() => {
   seedData();
   initCronJobs();
   sanitizeAllAttendanceRecords();
+  migrateCredentials();
 });
 
 app.get("/", (req, res) => {
