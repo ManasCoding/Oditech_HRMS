@@ -114,6 +114,11 @@ export const updateEmployee = async (req, res) => {
       req.body.employmentHistory = existing.employmentHistory;
     }
 
+    // Never overwrite password with empty string — if admin didn't type a new password, keep the existing one
+    if (!req.body.password || req.body.password.trim() === '') {
+      delete req.body.password;
+    }
+
     const employee = await Employee.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: false });
     res.json({ success: true, employee });
   } catch (error) {
