@@ -1,5 +1,6 @@
 import Timesheet from '../models/Timesheet.js';
 import Employee from '../models/Employee.js';
+import Task from '../models/Task.js';
 import { getIo } from '../socket.js';
 
 // Helper to convert 'HH:MM AM/PM' to minutes from midnight
@@ -208,3 +209,126 @@ export const getTimesheetById = async (req, res) => {
     res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
+
+/**
+ * Sync work update from Excel / Google Sheet to HRMS
+ * Automatically saves tasks to Task and Timesheet in MongoDB as a draft ('Pending')
+ * Does NOT submit to admin.
+ */
+export const syncSheetUpdate = async (req, res) => {
+  try {
+    const { employeeId, empCode, email, employeeName, date, tasks, slotKey, title, dailyRemarks } = req.body;
+
+    // Find the active employee by any provided identifier
+    let employee = null;
+    if (employeeId) {
+      employee = await Employee.findById(employeeId);
+    } else if (empCode) {
+      employee = await Employee.findOne({ empCode: new RegExp(`^${empCode.trim()}$`, 'i'), status: 'Active' });
+    } else if (email) {
+      employee = await Employee.findOne({ email: new RegExp(`^${email.trim()}$`, 'i'), status: 'Active' });
+    } else if (employeeName) {
+      employee = await Employee.findOne({ fullName: new RegExp(employeeName.trim(), 'i'), status: 'Active' });
+    }
+
+    if (!employee) {
+      return res.status(404).json({ success: false, message: 'Active employee not found. Please provide valid name, empCode, or email.' });
+    }
+
+    // Default to today if date not specified
+    const targetDate = date || new Date().toISOString().split('T')[0];
+
+    // Standardize task list
+    let taskList = [];
+    if (Array.isArray(tasks) && tasks.length > 0) {
+      taskList = tasks;
+    } else if (title) {
+      taskList = [{ slotKey: slotKey || 'General', title }];
+    }
+
+    if (taskList.length === 0) {
+      return res.status(400).json({ success: false, message: 'No tasks provided to sync' });
+    }
+
+    // Upsert tasks into Task collection
+    for (const t of taskList) {
+      if (!t.title || !t.title.trim()) continue;
+      const normalizedSlot = t.slotKey?.trim() || 'General';
+      await Task.findOneAndUpdate(
+        { employeeId: employee._id, date: targetDate, slotKey: normalizedSlot },
+        { 
+          title: t.title.trim(), 
+          status: 'Completed', 
+          employeeId: employee._id, 
+          date: targetDate, 
+          slotKey: normalizedSlot 
+        },
+        { upsert: true, new: true }
+      );
+    }
+
+    // Calculate timesheet week dates
+    const d = new Date(targetDate);
+    const day = d.getDay();
+    const diffToMon = d.getDate() - day + (day === 0 ? -6 : 1);
+    const mon = new Date(d.setDate(diffToMon));
+    const sun = new Date(mon);
+    sun.setDate(mon.getDate() + 6);
+    const weekStart = mon.toISOString().split('T')[0];
+    const weekEnd = sun.toISOString().split('T')[0];
+
+    // Check existing timesheet: only update if missing or still in 'Pending' (draft)
+    const existingTimesheet = await Timesheet.findOne({ employeeId: employee._id, date: targetDate });
+
+    if (!existingTimesheet || existingTimesheet.status === 'Pending') {
+      const allDayTasks = await Task.find({ employeeId: employee._id, date: targetDate });
+      const hourlyTasks = allDayTasks.map(t => ({
+        date: t.date,
+        slotKey: t.slotKey,
+        title: t.title,
+        status: 'Completed'
+      }));
+
+      const timesheetData = {
+        employeeId: employee._id,
+        employeeName: employee.fullName,
+        department: employee.department || 'General',
+        date: targetDate,
+        weekStart,
+        weekEnd,
+        hourlyTasks,
+        dailyRemarks: dailyRemarks || existingTimesheet?.dailyRemarks || '',
+        status: 'Pending' // Draft status: does NOT submit to admin
+      };
+
+      await Timesheet.findOneAndUpdate(
+        { employeeId: employee._id, date: targetDate },
+        timesheetData,
+        { upsert: true, new: true }
+      );
+    }
+
+    // Emit real-time socket event so the HRMS timesheet UI updates immediately
+    const io = getIo();
+    if (io) {
+      io.emit('timesheetUpdated', { employeeId: employee._id, date: targetDate });
+    }
+
+    return res.status(200).json({ 
+      success: true, 
+      message: 'Work update successfully synced to HRMS and saved to database as draft (not submitted to admin)', 
+      employee: {
+        id: employee._id,
+        name: employee.fullName,
+        empCode: employee.empCode,
+        department: employee.department
+      },
+      date: targetDate,
+      syncedTasksCount: taskList.length
+    });
+  } catch (error) {
+    console.error('Error in syncSheetUpdate:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
