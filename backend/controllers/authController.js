@@ -103,6 +103,7 @@ export const login = async (req, res) => {
             id: employee._id, 
             name: employee.fullName, 
             email: employee.email, 
+            department: employee.department || 'Engineering',
             role: 'employee', 
             slug: employee.empCode 
           } 
