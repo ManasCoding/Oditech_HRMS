@@ -14,6 +14,7 @@ const EmployeeSchema = new mongoose.Schema({
   // Separate credential fields — not tied to login email
   gmailCredential: { type: String, default: '' },
   credentialPassword: { type: String, default: '' },
+  workReportSheetUrl: { type: String, default: '' },
   
   // Employment Journey
   employmentType: { type: String, default: 'Regular' },
