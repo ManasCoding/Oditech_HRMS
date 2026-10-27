@@ -4,6 +4,7 @@ import Notification from '../models/Notification.js';
 import Attendance from '../models/Attendance.js';
 import Note from '../models/Note.js';
 import Task from '../models/Task.js';
+import Timesheet from '../models/Timesheet.js';
 import { getIo } from '../socket.js';
 import SystemSetting from '../models/SystemSetting.js';
 import Resignation from '../models/Resignation.js';
@@ -714,12 +715,53 @@ export const createBulkTasks = async (req, res) => {
       );
     }
 
+    // ── Auto-sync Timesheet documents for affected dates ──────────────────────
+    try {
+      const emp = await Employee.findById(employeeId).select('fullName department');
+      const weekStart = (dates && dates.length > 0) ? dates[0] : todayIST;
+      const weekEnd = (dates && dates.length > 0) ? dates[dates.length - 1] : todayIST;
+
+      for (const date of updatedDates) {
+        const dayTasks = await Task.find({ employeeId, date }).sort({ createdAt: 1 });
+        const hourlyTasks = dayTasks.map(t => ({
+          date: t.date || date,
+          slotKey: t.slotKey,
+          title: t.title,
+          status: t.status || 'Completed'
+        }));
+
+        await Timesheet.findOneAndUpdate(
+          { employeeId, date },
+          {
+            employeeId,
+            employeeName: emp?.fullName || 'Employee',
+            department: emp?.department || 'General',
+            date,
+            weekStart,
+            weekEnd,
+            hourlyTasks,
+            dailyRemarks: dailyRemarks?.[date] || '',
+            weeklyRemarks: weeklyRemarks || '',
+            submissionTime: new Date(),
+            status: 'Submitted'
+          },
+          { upsert: true, new: true }
+        );
+      }
+    } catch (tsErr) {
+      console.error('Error auto-syncing Timesheet collection:', tsErr);
+    }
+
     // Emit real-time event to Admin dashboard
     const io = getIo();
     if (io) {
       io.emit('timesheetUpdated', { 
         employeeId, 
         dates: Array.from(updatedDates) 
+      });
+      io.emit('timesheetSubmitted', {
+        employeeId,
+        dates: Array.from(updatedDates)
       });
     }
 
