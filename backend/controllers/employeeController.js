@@ -626,6 +626,19 @@ export const createBulkTasks = async (req, res) => {
   try {
     const { employeeId, tasks, dates, dailyRemarks, weeklyRemarks } = req.body;
 
+    if (!employeeId) {
+      return res.status(400).json({ success: false, message: 'Employee ID is required.' });
+    }
+
+    // Resolve employeeId (supports ObjectId or empCode)
+    let resolvedEmployeeId = employeeId;
+    if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+      const emp = await Employee.findOne({ empCode: employeeId }).select('_id');
+      if (emp) resolvedEmployeeId = emp._id;
+    } else {
+      resolvedEmployeeId = new mongoose.Types.ObjectId(employeeId);
+    }
+
     // ── Server-side time-lock validation (IST) ───────────────────────────────
     // Convert server time to IST regardless of server timezone
     const istNow   = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
@@ -644,85 +657,110 @@ export const createBulkTasks = async (req, res) => {
       return ((h >= 1 && h <= 8) ? h + 12 : h) * 60 + m;
     };
 
-    if (tasks && tasks.length > 0) {
-      // Find all existing tasks for this employee across these dates to distinguish unchanged items
-      const taskDates = [...new Set(tasks.map(t => t.date))];
-      const existingTasks = await Task.find({
-        employeeId,
-        date: { $in: taskDates }
-      });
-      const existingMap = new Map();
-      existingTasks.forEach(t => {
-        existingMap.set(`${t.date}_${t.slotKey}`, t.title);
-      });
+    const taskDates = [...new Set((tasks || []).map(t => t.date))];
+    const existingTasks = await Task.find({
+      employeeId: resolvedEmployeeId,
+      date: { $in: taskDates }
+    });
+    const existingMap = new Map();
+    existingTasks.forEach(t => {
+      existingMap.set(`${t.date}_${t.slotKey}`, (t.title || '').trim());
+    });
 
+    const validTasksToSave = [];
+    if (tasks && tasks.length > 0) {
       for (const task of tasks) {
         const key = `${task.date}_${task.slotKey}`;
         const existingTitle = existingMap.get(key);
-        // Only enforce time-lock validation on tasks that are actually new or modified!
+        const taskTitle = (task.title || '').trim();
+
+        // Check if this task is modified compared to DB
         const isModified = existingTitle === undefined 
-          ? (task.title && task.title.trim() !== '') 
-          : (existingTitle !== task.title);
+          ? (taskTitle !== '') 
+          : (existingTitle !== taskTitle);
 
-        if (isModified) {
-          // ── Date check ─────────────────────────────────────────────────────
-          if (task.date !== todayIST) {
-            return res.status(403).json({
-              success: false,
-              message: task.date < todayIST
-                ? `Timesheet for ${task.date} is locked. Past-date entries cannot be modified.`
-                : `Timesheet for ${task.date} is not yet available.`,
-            });
-          }
+        if (!isModified) {
+          // Unchanged task: keep it
+          validTasksToSave.push(task);
+          continue;
+        }
 
-          // ── Grace period check (slot end + 15 min) ─────────────────────────
-          const graceEndMin = slotEndMin(task.slotKey) + 15;
-          if (nowMinIST > graceEndMin) {
-            return res.status(403).json({
-              success: false,
-              message: `Slot "${task.slotKey}" is locked — the 15-minute grace period has expired.`,
-            });
-          }
+        // It is modified: verify time lock
+        if (task.date !== todayIST) {
+          // Skip modifying locked past dates instead of aborting whole request
+          continue;
+        }
+
+        // Grace period check for today's slots (slot end + 15 min)
+        const graceEndMin = slotEndMin(task.slotKey) + 15;
+        if (nowMinIST > graceEndMin) {
+          // Grace period expired for this slot: skip modifying it
+          continue;
+        }
+
+        validTasksToSave.push(task);
+      }
+    }
+
+    // ── Safe upsert per task ─────────────────────────────────────────────────
+    if (validTasksToSave && validTasksToSave.length > 0) {
+      for (const task of validTasksToSave) {
+        if (!task.title || !task.title.trim()) {
+          await Task.findOneAndDelete({
+            employeeId: resolvedEmployeeId,
+            date: task.date,
+            slotKey: task.slotKey
+          });
+        } else {
+          await Task.findOneAndUpdate(
+            { employeeId: resolvedEmployeeId, date: task.date, slotKey: task.slotKey },
+            { 
+              title: task.title.trim(), 
+              status: task.status || 'Completed', 
+              employeeId: resolvedEmployeeId, 
+              date: task.date, 
+              slotKey: task.slotKey 
+            },
+            { upsert: true, new: true }
+          );
         }
       }
     }
 
-    // ── Safe upsert per task (never touches locked/past slots in DB) ─────────
-    if (tasks && tasks.length > 0) {
-      for (const task of tasks) {
-        await Task.findOneAndUpdate(
-          { employeeId, date: task.date, slotKey: task.slotKey },
-          { title: task.title, status: task.status || 'Completed', employeeId, date: task.date, slotKey: task.slotKey },
-          { upsert: true, new: true }
-        );
-      }
-    }
-
-    // ── Update attendance only for dates that have submitted content ──────────
-    const updatedDates = new Set((tasks || []).map(t => t.date));
-    // Also include today's date if it has daily remarks even without tasks
+    // ── Update attendance for affected dates ─────────────────────────────────
+    const updatedDates = new Set((validTasksToSave || []).map(t => t.date));
     if (dailyRemarks) {
-      Object.keys(dailyRemarks).forEach(d => { if (d === todayIST) updatedDates.add(d); });
+      Object.keys(dailyRemarks).forEach(d => {
+        if (dailyRemarks[d] && dailyRemarks[d].trim()) updatedDates.add(d);
+      });
     }
 
     for (const date of updatedDates) {
       const updateData = { workStatus: 'Completed' };
       if (dailyRemarks?.[date]) updateData.remarks = dailyRemarks[date];
       await Attendance.findOneAndUpdate(
-        { employeeId, date },
-        updateData,
-        { upsert: false }
+        { employeeId: resolvedEmployeeId, date },
+        { 
+          $set: updateData,
+          $setOnInsert: {
+            employeeId: resolvedEmployeeId,
+            date,
+            status: 'Present',
+            workHours: '0h 0m'
+          }
+        },
+        { upsert: true }
       );
     }
 
     // ── Auto-sync Timesheet documents for affected dates ──────────────────────
     try {
-      const emp = await Employee.findById(employeeId).select('fullName department');
+      const emp = await Employee.findById(resolvedEmployeeId).select('fullName department empCode');
       const weekStart = (dates && dates.length > 0) ? dates[0] : todayIST;
       const weekEnd = (dates && dates.length > 0) ? dates[dates.length - 1] : todayIST;
 
       for (const date of updatedDates) {
-        const dayTasks = await Task.find({ employeeId, date }).sort({ createdAt: 1 });
+        const dayTasks = await Task.find({ employeeId: resolvedEmployeeId, date }).sort({ createdAt: 1 });
         const hourlyTasks = dayTasks.map(t => ({
           date: t.date || date,
           slotKey: t.slotKey,
@@ -731,9 +769,9 @@ export const createBulkTasks = async (req, res) => {
         }));
 
         await Timesheet.findOneAndUpdate(
-          { employeeId, date },
+          { employeeId: resolvedEmployeeId, date },
           {
-            employeeId,
+            employeeId: resolvedEmployeeId,
             employeeName: emp?.fullName || 'Employee',
             department: emp?.department || 'General',
             date,
@@ -755,12 +793,13 @@ export const createBulkTasks = async (req, res) => {
     // Emit real-time event to Admin dashboard
     const io = getIo();
     if (io) {
+      const empIdStr = resolvedEmployeeId.toString();
       io.emit('timesheetUpdated', { 
-        employeeId, 
+        employeeId: empIdStr, 
         dates: Array.from(updatedDates) 
       });
       io.emit('timesheetSubmitted', {
-        employeeId,
+        employeeId: empIdStr,
         dates: Array.from(updatedDates)
       });
     }
@@ -775,13 +814,50 @@ export const getWeeklyTasks = async (req, res) => {
   try {
     const { employeeId } = req.params;
     const { startDate, endDate } = req.query;
-    
+
+    let resolvedEmployeeId = employeeId;
+    if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+      const emp = await Employee.findOne({ empCode: employeeId }).select('_id');
+      if (emp) resolvedEmployeeId = emp._id;
+    } else {
+      resolvedEmployeeId = new mongoose.Types.ObjectId(employeeId);
+    }
+
     const tasks = await Task.find({
-      employeeId,
+      employeeId: resolvedEmployeeId,
       date: { $gte: startDate, $lte: endDate }
     });
-    
-    res.json({ success: true, tasks });
+
+    // Also fetch dailyRemarks from Attendance and Timesheet in this date range
+    const attendances = await Attendance.find({
+      employeeId: resolvedEmployeeId,
+      date: { $gte: startDate, $lte: endDate }
+    }).select('date remarks');
+
+    const timesheets = await Timesheet.find({
+      employeeId: resolvedEmployeeId,
+      date: { $gte: startDate, $lte: endDate }
+    }).select('date dailyRemarks weeklyRemarks');
+
+    const dailyRemarks = {};
+    attendances.forEach(a => {
+      if (a.remarks) dailyRemarks[a.date] = a.remarks;
+    });
+    timesheets.forEach(ts => {
+      if (ts.dailyRemarks) dailyRemarks[ts.date] = ts.dailyRemarks;
+    });
+
+    // Find latest weeklyRemarks in range
+    let weeklyRemarks = '';
+    const tsWithWeekly = timesheets.find(ts => ts.weeklyRemarks && ts.weeklyRemarks.trim());
+    if (tsWithWeekly) weeklyRemarks = tsWithWeekly.weeklyRemarks;
+
+    res.json({ 
+      success: true, 
+      tasks,
+      dailyRemarks,
+      weeklyRemarks 
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
