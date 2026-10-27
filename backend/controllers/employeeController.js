@@ -639,73 +639,13 @@ export const createBulkTasks = async (req, res) => {
       resolvedEmployeeId = new mongoose.Types.ObjectId(employeeId);
     }
 
-    // ── Server-side time-lock validation (IST) ───────────────────────────────
-    // Convert server time to IST regardless of server timezone
-    const istNow   = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    const todayIST = [
-      istNow.getFullYear(),
-      String(istNow.getMonth() + 1).padStart(2, '0'),
-      String(istNow.getDate()).padStart(2, '0'),
-    ].join('-');
-    const nowMinIST = istNow.getHours() * 60 + istNow.getMinutes();
-
-    // Parse "HH:MM" end-time from a slot key like "09:30 - 10:30"
-    // Hours 01-08 → PM (13-20),  09-12 → AM/noon
-    const slotEndMin = (slotKey) => {
-      const endStr = (slotKey || '').split(' - ')[1]?.trim() || '00:00';
-      const [h, m] = endStr.split(':').map(Number);
-      return ((h >= 1 && h <= 8) ? h + 12 : h) * 60 + m;
-    };
-
-    const taskDates = [...new Set((tasks || []).map(t => t.date))];
-    const existingTasks = await Task.find({
-      employeeId: resolvedEmployeeId,
-      date: { $in: taskDates }
-    });
-    const existingMap = new Map();
-    existingTasks.forEach(t => {
-      existingMap.set(`${t.date}_${t.slotKey}`, (t.title || '').trim());
-    });
-
-    const validTasksToSave = [];
+    // ── Safe upsert per task ─────────────────────────────────────────────────
     if (tasks && tasks.length > 0) {
       for (const task of tasks) {
-        const key = `${task.date}_${task.slotKey}`;
-        const existingTitle = existingMap.get(key);
+        if (!task.date || !task.slotKey) continue;
         const taskTitle = (task.title || '').trim();
 
-        // Check if this task is modified compared to DB
-        const isModified = existingTitle === undefined 
-          ? (taskTitle !== '') 
-          : (existingTitle !== taskTitle);
-
-        if (!isModified) {
-          // Unchanged task: keep it
-          validTasksToSave.push(task);
-          continue;
-        }
-
-        // It is modified: verify time lock
-        if (task.date !== todayIST) {
-          // Skip modifying locked past dates instead of aborting whole request
-          continue;
-        }
-
-        // Grace period check for today's slots (slot end + 15 min)
-        const graceEndMin = slotEndMin(task.slotKey) + 15;
-        if (nowMinIST > graceEndMin) {
-          // Grace period expired for this slot: skip modifying it
-          continue;
-        }
-
-        validTasksToSave.push(task);
-      }
-    }
-
-    // ── Safe upsert per task ─────────────────────────────────────────────────
-    if (validTasksToSave && validTasksToSave.length > 0) {
-      for (const task of validTasksToSave) {
-        if (!task.title || !task.title.trim()) {
+        if (!taskTitle) {
           await Task.findOneAndDelete({
             employeeId: resolvedEmployeeId,
             date: task.date,
@@ -715,7 +655,7 @@ export const createBulkTasks = async (req, res) => {
           await Task.findOneAndUpdate(
             { employeeId: resolvedEmployeeId, date: task.date, slotKey: task.slotKey },
             { 
-              title: task.title.trim(), 
+              title: taskTitle, 
               status: task.status || 'Completed', 
               employeeId: resolvedEmployeeId, 
               date: task.date, 
