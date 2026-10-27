@@ -644,24 +644,44 @@ export const createBulkTasks = async (req, res) => {
     };
 
     if (tasks && tasks.length > 0) {
-      for (const task of tasks) {
-        // ── Date check ─────────────────────────────────────────────────────
-        if (task.date !== todayIST) {
-          return res.status(403).json({
-            success: false,
-            message: task.date < todayIST
-              ? `Timesheet for ${task.date} is locked. Past-date entries cannot be modified.`
-              : `Timesheet for ${task.date} is not yet available.`,
-          });
-        }
+      // Find all existing tasks for this employee across these dates to distinguish unchanged items
+      const taskDates = [...new Set(tasks.map(t => t.date))];
+      const existingTasks = await Task.find({
+        employeeId,
+        date: { $in: taskDates }
+      });
+      const existingMap = new Map();
+      existingTasks.forEach(t => {
+        existingMap.set(`${t.date}_${t.slotKey}`, t.title);
+      });
 
-        // ── Grace period check (slot end + 15 min) ─────────────────────────
-        const graceEndMin = slotEndMin(task.slotKey) + 15;
-        if (nowMinIST > graceEndMin) {
-          return res.status(403).json({
-            success: false,
-            message: `Slot "${task.slotKey}" is locked — the 15-minute grace period has expired.`,
-          });
+      for (const task of tasks) {
+        const key = `${task.date}_${task.slotKey}`;
+        const existingTitle = existingMap.get(key);
+        // Only enforce time-lock validation on tasks that are actually new or modified!
+        const isModified = existingTitle === undefined 
+          ? (task.title && task.title.trim() !== '') 
+          : (existingTitle !== task.title);
+
+        if (isModified) {
+          // ── Date check ─────────────────────────────────────────────────────
+          if (task.date !== todayIST) {
+            return res.status(403).json({
+              success: false,
+              message: task.date < todayIST
+                ? `Timesheet for ${task.date} is locked. Past-date entries cannot be modified.`
+                : `Timesheet for ${task.date} is not yet available.`,
+            });
+          }
+
+          // ── Grace period check (slot end + 15 min) ─────────────────────────
+          const graceEndMin = slotEndMin(task.slotKey) + 15;
+          if (nowMinIST > graceEndMin) {
+            return res.status(403).json({
+              success: false,
+              message: `Slot "${task.slotKey}" is locked — the 15-minute grace period has expired.`,
+            });
+          }
         }
       }
     }
