@@ -668,7 +668,7 @@ export const createBulkTasks = async (req, res) => {
     }
 
     // ── Update attendance for affected dates ─────────────────────────────────
-    const updatedDates = new Set((validTasksToSave || []).map(t => t.date));
+    const updatedDates = new Set((tasks || []).map(t => t.date));
     if (dailyRemarks) {
       Object.keys(dailyRemarks).forEach(d => {
         if (dailyRemarks[d] && dailyRemarks[d].trim()) updatedDates.add(d);
@@ -696,8 +696,9 @@ export const createBulkTasks = async (req, res) => {
     // ── Auto-sync Timesheet documents for affected dates ──────────────────────
     try {
       const emp = await Employee.findById(resolvedEmployeeId).select('fullName department empCode');
-      const weekStart = (dates && dates.length > 0) ? dates[0] : todayIST;
-      const weekEnd = (dates && dates.length > 0) ? dates[dates.length - 1] : todayIST;
+      const todayDate = new Date().toISOString().split('T')[0];
+      const weekStart = (dates && dates.length > 0) ? dates[0] : todayDate;
+      const weekEnd = (dates && dates.length > 0) ? dates[dates.length - 1] : todayDate;
 
       for (const date of updatedDates) {
         const dayTasks = await Task.find({ employeeId: resolvedEmployeeId, date }).sort({ createdAt: 1 });
